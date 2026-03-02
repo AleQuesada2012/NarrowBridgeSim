@@ -1,0 +1,1 @@
+gcc -Wall -Wextra -Werror -std=c11 main.c config.c bridge.c -pthread -o bridge_sim
