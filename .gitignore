@@ -202,4 +202,7 @@ $RECYCLE.BIN/
 # Windows shortcuts
 *.lnk
 
+# Project executable
+*.exe
+bridge_sim
 # End of https://www.toptal.com/developers/gitignore/api/linux,macos,windows,clion+all,visualstudiocode,vim
