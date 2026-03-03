@@ -1,6 +1,8 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include "config.h"
+#include "bridge.h"
+#include "traffic_generator.h"
 
 int main(int argc, char *argv[]) {
 
@@ -45,7 +47,7 @@ int main(int argc, char *argv[]) {
     printf("Speed range: %d - %d\n",
            config.east.speed_min,
            config.east.speed_max);
-    printf("Ambulance percentage: %d%%\n",
+    printf("Ambulance percentage: %.2f%%\n",
            config.east.ambulance_percentage);
     printf("Green time: %d\n",
            config.east.green_time);
@@ -57,7 +59,7 @@ int main(int argc, char *argv[]) {
     printf("Speed range: %d - %d\n",
            config.west.speed_min,
            config.west.speed_max);
-    printf("Ambulance percentage: %d%%\n",
+    printf("Ambulance percentage: %.2f%%\n",
            config.west.ambulance_percentage);
     printf("Green time: %d\n",
            config.west.green_time);
@@ -65,6 +67,17 @@ int main(int argc, char *argv[]) {
            config.west.k_value);
 
     printf("=====================================\n");
+
+     Bridge *bridge = bridge_create(&config);
+
+    if (!bridge) {
+        fprintf(stderr, "Failed to create bridge.\n");
+        return EXIT_FAILURE;
+    }
+
+    traffic_generator_start(&config, bridge);
+
+    bridge_destroy(bridge);
 
     return EXIT_SUCCESS;
 }

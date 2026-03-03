@@ -158,7 +158,7 @@ int config_load(const char *filename, Config *config) {
             config->east.speed_max = atoi(value);
 
         else if (strcmp(key, "east_ambulance_percentage") == 0)
-            config->east.ambulance_percentage = atoi(value);
+            config->east.ambulance_percentage = atof(value);
 
         else if (strcmp(key, "east_green_time") == 0)
             config->east.green_time = atoi(value);
@@ -178,7 +178,7 @@ int config_load(const char *filename, Config *config) {
             config->west.speed_max = atoi(value);
 
         else if (strcmp(key, "west_ambulance_percentage") == 0)
-            config->west.ambulance_percentage = atoi(value);
+            config->west.ambulance_percentage = atof(value);
 
         else if (strcmp(key, "west_green_time") == 0)
             config->west.green_time = atoi(value);

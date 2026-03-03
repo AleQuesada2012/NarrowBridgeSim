@@ -11,7 +11,7 @@ typedef struct {
     double arrival_mean;
     int speed_min;
     int speed_max;
-    int ambulance_percentage;
+    double ambulance_percentage;  // 0.0 – 1.0
     int green_time;
     int k_value;
 } SideConfig;
