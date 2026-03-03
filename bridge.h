@@ -2,6 +2,7 @@
 #define BRIDGE_H
 
 #include <pthread.h>
+#include "config.h"
 
 /* ============================= */
 /* ======== Enumerations ======= */
@@ -33,7 +34,7 @@ typedef struct Bridge Bridge;
 /* ===== Initialization ======== */
 /* ============================= */
 
-Bridge* bridge_create(int length);
+Bridge* bridge_create(const Config *config);
 void bridge_destroy(Bridge *bridge);
 
 /* ============================= */
