@@ -62,3 +62,10 @@ void bridge_exit(Bridge *bridge, BridgeVehicleInfo *info) {
     printf("[BRIDGE] Vehicle %d exited bridge\n",
            info->id);
 }
+
+int bridge_get_length(Bridge *bridge) {
+    if (!bridge)
+        return -1;
+
+    return bridge->bridge_length;
+}

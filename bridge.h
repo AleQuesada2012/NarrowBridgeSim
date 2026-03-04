@@ -43,6 +43,7 @@ void bridge_destroy(Bridge *bridge);
 
 void bridge_arrive(Bridge *bridge, BridgeVehicleInfo *info);
 void bridge_exit(Bridge *bridge, BridgeVehicleInfo *info);
+int bridge_get_length(Bridge *bridge);
 
 /* ============================= */
 /* ===== Controller API ======== */

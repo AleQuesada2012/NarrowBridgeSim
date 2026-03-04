@@ -60,8 +60,10 @@ void* vehicle_thread(void *arg) {
     printf("[VEHICLE %d] Crossing bridge...\n", v->id);
 
     /* Simulate crossing time */
-    /* For now, use fixed time to simplify testing */
-    sleep(1);
+    int b_length = bridge_get_length(v->bridge);
+    double speed_m_per_sec = (v->speed * 1000) / 3600.0; // unit conversion km/h to m/s
+    double crossing_time = b_length / speed_m_per_sec;
+    usleep(crossing_time * 1e6); // convert to microseconds
 
     /* Notify bridge exit */
     bridge_exit(v->bridge, &info);
