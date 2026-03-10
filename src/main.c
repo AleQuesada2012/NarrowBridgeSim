@@ -47,7 +47,7 @@ int main(int argc, char *argv[]) {
     printf("Speed range: %d - %d\n",
            config.east.speed_min,
            config.east.speed_max);
-    printf("Ambulance percentage: %.2f%%\n",
+    printf("Ambulance percentage: %.2f\n",
            config.east.ambulance_percentage);
     printf("Green time: %d\n",
            config.east.green_time);
@@ -59,7 +59,7 @@ int main(int argc, char *argv[]) {
     printf("Speed range: %d - %d\n",
            config.west.speed_min,
            config.west.speed_max);
-    printf("Ambulance percentage: %.2f%%\n",
+    printf("Ambulance percentage: %.2f\n",
            config.west.ambulance_percentage);
     printf("Green time: %d\n",
            config.west.green_time);

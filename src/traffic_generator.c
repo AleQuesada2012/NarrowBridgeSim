@@ -55,7 +55,7 @@ void traffic_generator_start(const Config *config, Bridge *bridge) {
     printf("Simulation time: %d seconds\n\n", config->simulation_time);
 
     time_t start_time = time(NULL);
-    int vehicle_id = 0;
+    int vehicle_id = 1; // changed to start from 1 for better readability
 
     /* Dynamic array of thread IDs */
     size_t capacity = 100;
