@@ -27,25 +27,23 @@ static int next_vehicle_id() {
 /* ===== Helper Functions  ===== */
 /* ============================= */
 
-static double uniform_random() {
-    return (double)rand() / (double)RAND_MAX;
+static double uniform_random(unsigned int *seed){
+    return (double)rand_r(seed) / (double)RAND_MAX;
 }
 
-static double exponential(double mean) {
-    double u = uniform_random();
 
-    if (u < 1e-10)
-        u = 1e-10; // purpose: avoiding log(0)
-
-    return -mean * log(u);
+static double exponential(double mean, unsigned int *seed) {
+    double u = uniform_random(seed);
+    if (u > 1 - 1e-10) u = 1 - 1e-10; // avoid log(0) in return
+    return -mean * log(1 - u);
 }
 
-static int random_ambulance(double probability) {
-    return (uniform_random() < probability);
+static int random_ambulance(double probability, unsigned int *seed) {
+    return uniform_random(seed) < probability;
 }
 
-static double random_speed(int min, int max) {
-    return min + uniform_random() * (max - min);
+static double random_speed(int min, int max, unsigned int *seed) {
+    return min + uniform_random(seed) * (max - min);
 }
 
 /* ============================= */
@@ -64,6 +62,8 @@ typedef struct {
 /* ============================= */
 
 static void* generator_thread(void *arg) {
+
+    unsigned int rng_seed = (unsigned int)time(NULL) ^ (uintptr_t)pthread_self();
 
     GeneratorArgs *args = (GeneratorArgs*) arg;
 
@@ -93,17 +93,18 @@ static void* generator_thread(void *arg) {
     while (difftime(time(NULL), start_time) < config->simulation_time) {
 
         /* Generate inter-arrival time */
-        double wait_time = exponential(side->arrival_mean);
+        // double wait_time = exponential(side->arrival_mean);
+        double wait_time = exponential(side->arrival_mean, &rng_seed);
 
         usleep((useconds_t)(wait_time * 1e6));
 
         if (difftime(time(NULL), start_time) >= config->simulation_time)
-            break;
+            break; // don't generate a new car, but let the existing ones finish
 
         /* Generate vehicle attributes */
         int id = next_vehicle_id();
-        int is_ambulance = random_ambulance(side->ambulance_percentage);
-        double speed = random_speed(side->speed_min, side->speed_max);
+        int is_ambulance = random_ambulance(side->ambulance_percentage, &rng_seed);
+        double speed = random_speed(side->speed_min, side->speed_max, &rng_seed);
 
         Vehicle *vehicle = vehicle_create(
             id,
