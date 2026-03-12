@@ -84,16 +84,12 @@ void bridge_enter(Bridge *b, BridgeVehicleInfo *info)
             b->ambulances_waiting_west++;
     }
 
-    int opposite_ambulance_waiting =
-        (info->direction == EAST)
-            ? b->ambulances_waiting_west
-            : b->ambulances_waiting_east;
 
     while (
         (b->cars_on_bridge > 0 && b->current_direction != info->direction) ||
-        /* Ambulance priority rule */
         (!info->is_ambulance &&
-         opposite_ambulance_waiting > 0 &&
+         ((info->direction == EAST ? b->ambulances_waiting_west
+                                   : b->ambulances_waiting_east) > 0) &&
          b->current_direction == info->direction))
     {
         printf("[VEHICLE %d] Waiting for bridge to switch to (%s)\n",
@@ -120,7 +116,7 @@ void bridge_enter(Bridge *b, BridgeVehicleInfo *info)
     b->cars_on_bridge++;
     b->current_direction = info->direction;
 
-    printf("[BRIDGE] Vehicle %d entering (%s). Cars on bridge: %d\n",
+    printf("[BRIDGE] Vehicle %d entered from %s. Cars on bridge: %d\n",
            info->id,
            info->direction == EAST ? "EAST" : "WEST",
            b->cars_on_bridge);
@@ -146,7 +142,7 @@ void bridge_leave(Bridge *b, BridgeVehicleInfo *info)
 
     b->cars_on_bridge--;
 
-    printf("[BRIDGE] Vehicle %d exited (%s). Cars remaining: %d\n",
+    printf("[BRIDGE] Vehicle %d exited coming from %s. Cars remaining: %d\n",
            info->id,
            info->direction == EAST ? "EAST" : "WEST",
            b->cars_on_bridge);
@@ -158,14 +154,12 @@ void bridge_leave(Bridge *b, BridgeVehicleInfo *info)
         if (b->ambulances_waiting_east > 0)
         {
             b->current_direction = EAST;
-            printf("[BRIDGE] PRIORITY: ambulance waiting EAST\n");
-            pthread_cond_broadcast(&b->east_cv);
+            printf("[BRIDGE] PRIORITY switch: ambulance waiting EAST\n");
         }
         else if (b->ambulances_waiting_west > 0)
         {
             b->current_direction = WEST;
-            printf("[BRIDGE] PRIORITY: ambulance waiting WEST\n");
-            pthread_cond_broadcast(&b->west_cv);
+            printf("[BRIDGE] PRIORITY switch: ambulance waiting WEST\n");
         }
 
         /* Normal flow otherwise */
@@ -176,11 +170,6 @@ void bridge_leave(Bridge *b, BridgeVehicleInfo *info)
             {
                 b->current_direction = WEST;
                 printf("[BRIDGE] Switching direction to WEST\n");
-                pthread_cond_broadcast(&b->west_cv);
-            }
-            else
-            {
-                pthread_cond_broadcast(&b->east_cv);
             }
         }
         else
@@ -188,14 +177,12 @@ void bridge_leave(Bridge *b, BridgeVehicleInfo *info)
             if (b->waiting_east > 0)
             {
                 b->current_direction = EAST;
-                printf("[BRIDGE] Switching direction to EAST\n");
-                pthread_cond_broadcast(&b->east_cv);
-            }
-            else
-            {
-                pthread_cond_broadcast(&b->west_cv);
+                printf("[BRIDGE] Switching direction to EAST\n"); 
             }
         }
+        // wake up both side and let the while condition decide based on the current direction
+        pthread_cond_broadcast(&b->east_cv);
+        pthread_cond_broadcast(&b->west_cv);
     }
 
     pthread_mutex_unlock(&b->lock);
