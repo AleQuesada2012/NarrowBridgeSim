@@ -119,11 +119,11 @@ static void* generator_thread(void *arg) {
             continue;
         }
 
-        // printf("[GENERATOR (%s)] Vehicle %d | Ambulance: %s | Speed: %.2f km/h\n",
-        //        direction == EAST ? "EAST" : "WEST",
-        //        id,
-        //        is_ambulance ? "YES" : "NO",
-        //        speed);
+        printf("[GENERATOR (%s)] Vehicle %d | Ambulance: %s | Speed: %.2f km/h\n",
+               direction == EAST ? "EAST" : "WEST",
+               id,
+               is_ambulance ? "YES" : "NO",
+               speed);
 
         pthread_t tid;
 

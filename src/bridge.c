@@ -8,65 +8,49 @@
 /* ===== Internal Structure ==== */
 /* ============================= */
 
-struct Bridge {
-    int bridge_length;
-    pthread_mutex_t lock;
-    pthread_cond_t cond_east;
-    pthread_cond_t cond_west;
-
-    Direction active_direction;
-    int cars_on_bridge;
-
-    int waiting[2];
-    int ambulances_waiting[2];
-
-    int passed_count[2];
-};
 
 /* ============================= */
 /* ===== Bridge Lifecycle  ===== */
 /* ============================= */
 
-Bridge* bridge_create(const Config *config) {
-    if (!config)
-        return NULL;
+Bridge *bridge_create(const Config *config)
+{
+    Bridge *b = malloc(sizeof(Bridge));
 
-    Bridge *bridge = malloc(sizeof(Bridge));
-    if (!bridge)
-        return NULL;
+    b->length = config->bridge_length;
 
-    bridge->bridge_length = config->bridge_length;
+    b->slots = malloc(sizeof(pthread_mutex_t) * b->length);
 
-    pthread_mutex_init(&bridge->lock, NULL);
-    pthread_cond_init(&bridge->cond_east, NULL);
-    pthread_cond_init(&bridge->cond_west, NULL);
+    for (int i = 0; i < b->length; i++)
+        pthread_mutex_init(&b->slots[i], NULL);
 
-    bridge->active_direction = NONE;
-    bridge->cars_on_bridge = 0;
+    pthread_mutex_init(&b->lock, NULL);
 
-    bridge->waiting[EAST] = 0;
-    bridge->waiting[WEST] = 0;
-    bridge->ambulances_waiting[EAST] = 0;
-    bridge->ambulances_waiting[WEST] = 0;
+    pthread_cond_init(&b->east_cv, NULL);
+    pthread_cond_init(&b->west_cv, NULL);
 
-    bridge->passed_count[EAST] = 0;
-    bridge->passed_count[WEST] = 0;
+    b->cars_on_bridge = 0;
+    b->waiting_east = 0;
+    b->waiting_west = 0;
 
-    printf("[BRIDGE] Created (length: %d meters)\n", bridge->bridge_length);
+    b->current_direction = EAST;
+    printf("Bridge created with length: %d meters.\n", b->length);
 
-    return bridge;
+    return b;
 }
 
-void bridge_destroy(Bridge *bridge) {
-    if (!bridge)
-        return;
+void bridge_destroy(Bridge *b) {
+    for (int i = 0; i < b->length; i++)
+        pthread_mutex_destroy(&b->slots[i]);
 
-    pthread_mutex_destroy(&bridge->lock);
-    pthread_cond_destroy(&bridge->cond_east);
-    pthread_cond_destroy(&bridge->cond_west);
+    free(b->slots);
 
-    printf("[BRIDGE] Destroyed\n");
-    free(bridge);
+    pthread_mutex_destroy(&b->lock);
+
+    pthread_cond_destroy(&b->east_cv);
+    pthread_cond_destroy(&b->west_cv);
+    printf("=== Bridge destroyed.===\n");
+    free(b);
 }
 
 /* ============================= */
@@ -74,116 +58,107 @@ void bridge_destroy(Bridge *bridge) {
 /* ============================= */
 
 
-void bridge_arrive(Bridge *bridge, BridgeVehicleInfo *info) {
-    if (!bridge || !info) return;
+void bridge_enter(Bridge *b, BridgeVehicleInfo *info) {
 
-    Direction my_dir = info->direction;
-    Direction opp_dir = (my_dir == EAST) ? WEST : EAST;
+    //TODO: Handle ambulances
+    pthread_mutex_lock(&b->lock);
 
-
-    pthread_mutex_lock(&bridge->lock);
-
-    // register the arrival
-    bridge->waiting[my_dir]++;
-    if (info->is_ambulance) {
-        bridge->ambulances_waiting[my_dir]++;
-    }
-
-    printf("[BRIDGE] Vehicle %d (%s)%s arrived and is waiting.\n",
+    printf("[VEHICLE %d] Arrived at bridge from %s\n",
            info->id,
-           my_dir == EAST ? "EAST" : "WEST",
-           info->is_ambulance ? " [AMBULANCE]" : "");
+           info->direction == EAST ? "EAST" : "WEST");
 
+    if (info->direction == EAST)
+        b->waiting_east++;
+    else
+        b->waiting_west++;
 
-    while (1) {
-        // the bridge is empty or traffic is moving in my direction
-        int safe_direction = (bridge->cars_on_bridge == 0 || bridge->active_direction == my_dir);
+    while (b->cars_on_bridge > 0 && b->current_direction != info->direction) {
+        printf("[VEHICLE %d] Waiting for bridge to switch to (%s)\n",
+               info->id,
+               info->direction == EAST ? "EAST" : "WEST");
 
-
-        // if I am NOT an ambulance, and there is an ambulance waiting on the opposite side, I yield.
-        int yield_to_ambulance = (!info->is_ambulance && bridge->ambulances_waiting[opp_dir] > 0);
-
-        if (safe_direction && !yield_to_ambulance) {
-            break;
-        }
-
-        // if we cannot pass, we wait on the correct condition variable
-        if (my_dir == EAST) {
-            pthread_cond_wait(&bridge->cond_east, &bridge->lock);
-        } else {
-            pthread_cond_wait(&bridge->cond_west, &bridge->lock);
-        }
+        if (info->direction == EAST)
+            pthread_cond_wait(&b->east_cv, &b->lock);
+        else
+            pthread_cond_wait(&b->west_cv, &b->lock);
     }
 
-    // update bridge state upon entry
-    bridge->waiting[my_dir]--;
-    if (info->is_ambulance) {
-        bridge->ambulances_waiting[my_dir]--;
-    }
+    if (info->direction == EAST)
+        b->waiting_east--;
+    else
+        b->waiting_west--;
 
-    bridge->cars_on_bridge++;
-    bridge->active_direction = my_dir;
-    bridge->passed_count[my_dir]++;
+    b->cars_on_bridge++;
+    b->current_direction = info->direction;
 
-    printf("[BRIDGE] Vehicle %d ENTERED the bridge. (Total crossing: %d)\n",
-           info->id, bridge->cars_on_bridge);
+    printf("[BRIDGE] Vehicle %d entering (%s). Cars on bridge: %d\n",
+           info->id,
+           info->direction == EAST ? "EAST" : "WEST",
+           b->cars_on_bridge);
 
-    // unlock the mutex
-    pthread_mutex_unlock(&bridge->lock);
+    pthread_mutex_unlock(&b->lock);
+
+    pthread_mutex_lock(&b->slots[0]);
 }
 
-void bridge_exit(Bridge *bridge, BridgeVehicleInfo *info) {
-    if (!bridge || !info) return;
+void bridge_advance(Bridge *b, int position)
+{
+    pthread_mutex_lock(&b->slots[position + 1]);
+    pthread_mutex_unlock(&b->slots[position]);
 
-    Direction my_dir = info->direction;
-    Direction opp_dir = (my_dir == EAST) ? WEST : EAST;
+    //printf("[VEHICLE %d] Moved to slot %d\n", info->id, position + 1);
+}
 
-    pthread_mutex_lock(&bridge->lock);
 
-    // register the exit
-    bridge->cars_on_bridge--;
-    printf("[BRIDGE] Vehicle %d EXITED the bridge. (Remaining: %d)\n",
-           info->id, bridge->cars_on_bridge);
+void bridge_leave(Bridge *b, BridgeVehicleInfo *info)
+{
+    pthread_mutex_unlock(&b->slots[b->length - 1]);
 
-    // wake up waiting threads ONLY if the bridge is completely empty
-    if (bridge->cars_on_bridge == 0) {
+    pthread_mutex_lock(&b->lock);
 
-        bridge->active_direction = NONE;
+    b->cars_on_bridge--;
 
-        // decide who to wake up based on priorities:
+    printf("[BRIDGE] Vehicle %d exited (%s). Cars remaining: %d\n",
+           info->id,
+           info->direction == EAST ? "EAST" : "WEST",
+           b->cars_on_bridge);
 
-        // 1- ambulances waiting on the opposite side?
-        if (bridge->ambulances_waiting[opp_dir] > 0) {
-            printf("[BRIDGE] Empty bridge. Waking up opposite side for AMBULANCE.\n");
-            if (opp_dir == EAST) pthread_cond_broadcast(&bridge->cond_east);
-            else pthread_cond_broadcast(&bridge->cond_west);
+    if (b->cars_on_bridge == 0)
+    {
+        if (b->current_direction == EAST)
+        {
+            if (b->waiting_west > 0)
+            {
+                b->current_direction = WEST;
+                printf("[BRIDGE] Switching direction to WEST\n");
+                pthread_cond_broadcast(&b->west_cv);
+            }
+            else
+            {
+                pthread_cond_broadcast(&b->east_cv);
+            }
         }
-        // 2- ambulances waiting on the same side?
-        else if (bridge->ambulances_waiting[my_dir] > 0) {
-            printf("[BRIDGE] Empty bridge. Waking up same side for AMBULANCE.\n");
-            if (my_dir == EAST) pthread_cond_broadcast(&bridge->cond_east);
-            else pthread_cond_broadcast(&bridge->cond_west);
-        }
-        // 3- are there regular cars waiting on the opposite side?
-        else if (bridge->waiting[opp_dir] > 0) {
-            printf("[BRIDGE] Empty bridge. Waking up opposite side.\n");
-            if (opp_dir == EAST) pthread_cond_broadcast(&bridge->cond_east);
-            else pthread_cond_broadcast(&bridge->cond_west);
-        }
-        // 4- are there regular cars waiting on the same side?
-        else if (bridge->waiting[my_dir] > 0) {
-            printf("[BRIDGE] Empty bridge. Waking up same side.\n");
-            if (my_dir == EAST) pthread_cond_broadcast(&bridge->cond_east);
-            else pthread_cond_broadcast(&bridge->cond_west);
+        else
+        {
+            if (b->waiting_east > 0)
+            {
+                b->current_direction = EAST;
+                printf("[BRIDGE] Switching direction to EAST\n");
+                pthread_cond_broadcast(&b->east_cv);
+            }
+            else
+            {
+                pthread_cond_broadcast(&b->west_cv);
+            }
         }
     }
 
-    pthread_mutex_unlock(&bridge->lock);
+    pthread_mutex_unlock(&b->lock);
 }
 
 int bridge_get_length(Bridge *bridge) {
     if (!bridge)
         return -1;
 
-    return bridge->bridge_length;
+    return bridge->length;
 }

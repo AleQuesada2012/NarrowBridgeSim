@@ -27,6 +27,10 @@ To compile the project, simply run:
 ```bash
 make
 ```
+You can run the project using several options:
+* `make run` compiles and runs the project
+* `./bridge_sim` after running `make` (it requires the runnable file)
+* `./bridge_sim [yourConfigFile.config]` passing a `.config` file as a parameter. This option runs by default with `bridge.config`.
 ## Team members
 | [@An-Gi](https://github.com/An-Gi) | [@AleQuesada2012](https://github.com/AleQuesada2012) | [@Est3b4nEspSol](https://github.com/Est3b4nEspSol) |
 |:---:|:---:|:---:|

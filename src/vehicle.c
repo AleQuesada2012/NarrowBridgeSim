@@ -37,40 +37,43 @@ void vehicle_destroy(Vehicle *vehicle) {
 /* ===== Thread Routine    ===== */
 /* ============================= */
 
-void* vehicle_thread(void *arg) {
+void* vehicle_thread(void *arg)
+{
+    Vehicle *v = arg;
 
-    Vehicle *v = (Vehicle*) arg;
-
-    if (!v)
-        return NULL;
-
-    BridgeVehicleInfo info;
-    info.id = v->id;
-    info.direction = v->direction;
-    info.is_ambulance = v->is_ambulance;
-
-    printf("[VEHICLE %d] Arriving from %s%s\n",
+    printf("[VEHICLE %d] Created (%s) speed=%.2f km/h %s\n",
            v->id,
            v->direction == EAST ? "EAST" : "WEST",
-           v->is_ambulance ? " [AMBULANCE]" : "");
+           v->speed,
+           v->is_ambulance ? "[AMBULANCE]" : "");
 
-    /* Notify bridge */
-    bridge_arrive(v->bridge, &info);
+    BridgeVehicleInfo info = {
+        v->id,
+        v->direction,
+        v->is_ambulance
+    };
 
-    printf("[VEHICLE %d] Crossing bridge...\n", v->id);
+    double speed_mps = v->speed / 3.6;
+    double meter_time = 1.0 / speed_mps;
 
-    /* Simulate crossing time */
-    int b_length = bridge_get_length(v->bridge);
-    double speed_m_per_sec = (v->speed * 1000) / 3600.0; // unit conversion km/h to m/s
-    double crossing_time = b_length / speed_m_per_sec;
-    usleep(crossing_time * 1e6); // convert to microseconds
+    bridge_enter(v->bridge, &info);
 
-    /* Notify bridge exit */
-    bridge_exit(v->bridge, &info);
+    //printf("[VEHICLE %d] Entered bridge\n", v->id);
 
-    printf("[VEHICLE %d] Finished crossing\n", v->id);
+    for (int i = 0; i < v->bridge->length - 1; i++)
+    {
+        usleep(meter_time * 1e6);
 
-    vehicle_destroy(v);
+        bridge_advance(v->bridge, i);
+    }
+
+    usleep(meter_time * 1e6);
+
+    //printf("[VEHICLE %d] Exiting bridge\n", v->id);
+
+    bridge_leave(v->bridge, &info);
+
+    free(v);
 
     return NULL;
 }

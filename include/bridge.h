@@ -28,7 +28,24 @@ typedef struct {
 /* ======= Opaque Bridge ======= */
 /* ============================= */
 
-typedef struct Bridge Bridge;
+typedef struct {
+    int length;
+    pthread_mutex_t *slots;
+
+    pthread_mutex_t lock;
+
+    pthread_cond_t east_cv;
+    pthread_cond_t west_cv;
+
+    int cars_on_bridge;
+
+    int waiting_east;
+    int waiting_west;
+
+    Direction current_direction;
+
+} Bridge;
+
 
 /* ============================= */
 /* ===== Initialization ======== */
@@ -41,8 +58,9 @@ void bridge_destroy(Bridge *bridge);
 /* ===== Vehicle Interface ===== */
 /* ============================= */
 
-void bridge_arrive(Bridge *bridge, BridgeVehicleInfo *info);
-void bridge_exit(Bridge *bridge, BridgeVehicleInfo *info);
+void bridge_enter(Bridge *b, BridgeVehicleInfo *info);
+void bridge_leave(Bridge *b, BridgeVehicleInfo *info);
+void bridge_advance(Bridge *b, int position);
 int bridge_get_length(Bridge *bridge);
 
 /* ============================= */
