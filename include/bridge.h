@@ -42,6 +42,9 @@ typedef struct {
     int waiting_east;
     int waiting_west;
 
+    int ambulances_waiting_east;
+    int ambulances_waiting_west;
+
     Direction current_direction;
 
 } Bridge;
@@ -61,6 +64,7 @@ void bridge_destroy(Bridge *bridge);
 void bridge_enter(Bridge *b, BridgeVehicleInfo *info);
 void bridge_leave(Bridge *b, BridgeVehicleInfo *info);
 void bridge_advance(Bridge *b, int position);
+// void bridge_advance(Bridge *b, BridgeVehicleInfo *info, int position); // debugging
 int bridge_get_length(Bridge *bridge);
 
 /* ============================= */

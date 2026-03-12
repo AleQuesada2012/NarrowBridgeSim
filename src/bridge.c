@@ -8,6 +8,7 @@
 /* ===== Internal Structure ==== */
 /* ============================= */
 
+//TODO: implement "max cars on bridge" logic
 
 /* ============================= */
 /* ===== Bridge Lifecycle  ===== */
@@ -32,6 +33,8 @@ Bridge *bridge_create(const Config *config)
     b->cars_on_bridge = 0;
     b->waiting_east = 0;
     b->waiting_west = 0;
+    b->ambulances_waiting_east = 0;
+    b->ambulances_waiting_west = 0;
 
     b->current_direction = EAST;
     printf("Bridge created with length: %d meters.\n", b->length);
@@ -39,7 +42,8 @@ Bridge *bridge_create(const Config *config)
     return b;
 }
 
-void bridge_destroy(Bridge *b) {
+void bridge_destroy(Bridge *b)
+{
     for (int i = 0; i < b->length; i++)
         pthread_mutex_destroy(&b->slots[i]);
 
@@ -57,10 +61,10 @@ void bridge_destroy(Bridge *b) {
 /* ===== Synchronization  ====== */
 /* ============================= */
 
+void bridge_enter(Bridge *b, BridgeVehicleInfo *info)
+{
 
-void bridge_enter(Bridge *b, BridgeVehicleInfo *info) {
-
-    //TODO: Handle ambulances
+    // TODO: Handle ambulances
     pthread_mutex_lock(&b->lock);
 
     printf("[VEHICLE %d] Arrived at bridge from %s\n",
@@ -68,11 +72,30 @@ void bridge_enter(Bridge *b, BridgeVehicleInfo *info) {
            info->direction == EAST ? "EAST" : "WEST");
 
     if (info->direction == EAST)
+    {
         b->waiting_east++;
+        if (info->is_ambulance)
+            b->ambulances_waiting_east++;
+    }
     else
+    {
         b->waiting_west++;
+        if (info->is_ambulance)
+            b->ambulances_waiting_west++;
+    }
 
-    while (b->cars_on_bridge > 0 && b->current_direction != info->direction) {
+    int opposite_ambulance_waiting =
+        (info->direction == EAST)
+            ? b->ambulances_waiting_west
+            : b->ambulances_waiting_east;
+
+    while (
+        (b->cars_on_bridge > 0 && b->current_direction != info->direction) ||
+        /* Ambulance priority rule */
+        (!info->is_ambulance &&
+         opposite_ambulance_waiting > 0 &&
+         b->current_direction == info->direction))
+    {
         printf("[VEHICLE %d] Waiting for bridge to switch to (%s)\n",
                info->id,
                info->direction == EAST ? "EAST" : "WEST");
@@ -83,10 +106,16 @@ void bridge_enter(Bridge *b, BridgeVehicleInfo *info) {
             pthread_cond_wait(&b->west_cv, &b->lock);
     }
 
-    if (info->direction == EAST)
+    if (info->direction == EAST) {
         b->waiting_east--;
-    else
+        if (info->is_ambulance)
+            b->ambulances_waiting_east--;
+    }
+    else {
         b->waiting_west--;
+        if (info->is_ambulance)
+            b->ambulances_waiting_west--;
+    }
 
     b->cars_on_bridge++;
     b->current_direction = info->direction;
@@ -106,9 +135,8 @@ void bridge_advance(Bridge *b, int position)
     pthread_mutex_lock(&b->slots[position + 1]);
     pthread_mutex_unlock(&b->slots[position]);
 
-    //printf("[VEHICLE %d] Moved to slot %d\n", info->id, position + 1);
+    // printf("[VEHICLE %d] Moved to slot %d\n", info->id, position + 1);
 }
-
 
 void bridge_leave(Bridge *b, BridgeVehicleInfo *info)
 {
@@ -125,7 +153,24 @@ void bridge_leave(Bridge *b, BridgeVehicleInfo *info)
 
     if (b->cars_on_bridge == 0)
     {
-        if (b->current_direction == EAST)
+        /* Ambulance priority first */
+
+        if (b->ambulances_waiting_east > 0)
+        {
+            b->current_direction = EAST;
+            printf("[BRIDGE] PRIORITY: ambulance waiting EAST\n");
+            pthread_cond_broadcast(&b->east_cv);
+        }
+        else if (b->ambulances_waiting_west > 0)
+        {
+            b->current_direction = WEST;
+            printf("[BRIDGE] PRIORITY: ambulance waiting WEST\n");
+            pthread_cond_broadcast(&b->west_cv);
+        }
+
+        /* Normal flow otherwise */
+
+        else if (b->current_direction == EAST)
         {
             if (b->waiting_west > 0)
             {
@@ -156,7 +201,8 @@ void bridge_leave(Bridge *b, BridgeVehicleInfo *info)
     pthread_mutex_unlock(&b->lock);
 }
 
-int bridge_get_length(Bridge *bridge) {
+int bridge_get_length(Bridge *bridge)
+{
     if (!bridge)
         return -1;
 
