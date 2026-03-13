@@ -205,6 +205,6 @@ $RECYCLE.BIN/
 # Project executable
 *.exe
 bridge_sim
-
+bridge_gui
 build/
 # End of https://www.toptal.com/developers/gitignore/api/linux,macos,windows,clion+all,visualstudiocode,vim

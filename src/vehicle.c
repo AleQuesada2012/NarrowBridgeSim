@@ -19,11 +19,11 @@ Vehicle* vehicle_create(
     if (!vehicle)
         return NULL;
 
-    vehicle->id = id;
-    vehicle->direction = direction;
+    vehicle->id          = id;
+    vehicle->direction   = direction;
     vehicle->is_ambulance = is_ambulance;
-    vehicle->speed = speed;
-    vehicle->bridge = bridge;
+    vehicle->speed       = speed;
+    vehicle->bridge      = bridge;
 
     return vehicle;
 }
@@ -46,6 +46,7 @@ void* vehicle_thread(void *arg)
            v->direction == EAST ? "EAST" : "WEST",
            v->speed,
            v->is_ambulance ? "[AMBULANCE]" : "");
+    fflush(stdout);
 
     BridgeVehicleInfo info = {
         v->id,
@@ -53,27 +54,50 @@ void* vehicle_thread(void *arg)
         v->is_ambulance
     };
 
-    double speed_mps = v->speed / 3.6;
+    double speed_mps  = v->speed / 3.6;
     double meter_time = 1.0 / speed_mps;
 
     bridge_enter(v->bridge, &info);
 
-    //printf("[VEHICLE %d] Entered bridge\n", v->id);
+    /*
+     * Structured slot-position log — consumed by the GUI process.
+     *
+     * Format: [SLOT <id> <slot> <bridge_len> <direction> <is_ambulance>]
+     *   slot == -1   → vehicle has fully exited the bridge
+     *   slot ==  0   → vehicle just entered (first meter)
+     *   slot ==  N   → vehicle is at meter N (0-based)
+     *
+     * direction is "EAST" or "WEST".
+     * All fields are separated by spaces inside the brackets.
+     */
+    printf("[SLOT %d 0 %d %s %d]\n",
+           v->id, v->bridge->length,
+           v->direction == EAST ? "EAST" : "WEST",
+           v->is_ambulance);
+    fflush(stdout);
 
     for (int i = 0; i < v->bridge->length - 1; i++)
     {
-        usleep(meter_time * 1e6);
-
+        usleep((useconds_t)(meter_time * 1e6));
         bridge_advance(v->bridge, i);
+
+        printf("[SLOT %d %d %d %s %d]\n",
+               v->id, i + 1, v->bridge->length,
+               v->direction == EAST ? "EAST" : "WEST",
+               v->is_ambulance);
+        fflush(stdout);
     }
 
-    usleep(meter_time * 1e6);
-
-    //printf("[VEHICLE %d] Exiting bridge\n", v->id);
-
+    usleep((useconds_t)(meter_time * 1e6));
     bridge_leave(v->bridge, &info);
 
-    free(v);
+    /* Slot -1: vehicle fully exited */
+    printf("[SLOT %d -1 %d %s %d]\n",
+           v->id, v->bridge->length,
+           v->direction == EAST ? "EAST" : "WEST",
+           v->is_ambulance);
+    fflush(stdout);
 
+    free(v);
     return NULL;
 }

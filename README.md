@@ -22,6 +22,15 @@ The system can be configured to operate under one of three administrative modes:
 
 **Prerequisites:** A native Linux environment (no virtual machines) with GCC installed.
 
+Dependencies
+
+Ubuntu:
+`sudo apt install libx11-dev`
+
+MacOS:
+`brew install --cask xquartz`
+`brew install libx11`
+
 **Compilation:**
 To compile the project, simply run:
 ```bash
