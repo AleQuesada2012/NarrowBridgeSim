@@ -6,101 +6,44 @@
 #include "bridge.h"
 
 /* ========================================= */
-/* ========INTERNAL STRUCTURES============== */
-/* ========================================= */
-
-
-typedef struct {
-    int priority;           // 0 = Ambulance (Highest), 1+ = Normal vehicle
-    int seq;                // Ticket number like Lottery
-    pthread_cond_t cv;
-    int ready;
-} WaitNode;
-
-
-typedef struct {
-    WaitNode *data[1000];
-    int size;
-} WaitHeap;
-
-
-
-struct Bridge {
-    int length;
-    pthread_mutex_t lock;
-    pthread_mutex_t *slots;
-
-    WaitHeap east_queue;
-    WaitHeap west_queue;
-
-    int cars_on_bridge;
-    Direction current_direction;
-    int next_seq;                   // ticket dispenser
-
-
-    int waiting_east;
-    int waiting_west;
-    int ambulances_waiting_east;
-    int ambulances_waiting_west;
-};
-
-/* ========================================= */
 /* ==============PRIORITY QUEUE============= */
 /* ========================================= */
 
-/* Compares two nodes. Returns 1 if 'a' should go before 'b' */
-static inline int heap_before(const WaitNode *a, const WaitNode *b) {
-    if (a->priority != b->priority)
-        return a->priority < b->priority;
-    return a->seq < b->seq;
-}
-
-
 static void heap_push(WaitHeap *h, WaitNode *node) {
-    int i = h->size++;
-    h->data[i] = node;
+    int insert_idx = h->size; // go to the back of the line
 
-    while (i > 0) {
-        int parent = (i - 1) / 2;
-        if (heap_before(h->data[i], h->data[parent])) {
-            WaitNode *tmp    = h->data[i];
-            h->data[i]       = h->data[parent];
-            h->data[parent]  = tmp;
-            i = parent;
-        } else {
-            break;
+    if (node->priority == 0) {
+        // It's an ambulance
+        insert_idx = 0;
+        while (insert_idx < h->size && h->data[insert_idx]->priority == 0) {
+            insert_idx++; // Respect other ambulances that arrived first
         }
     }
+
+    // Shift everyone else one step back to make room
+    for (int i = h->size; i > insert_idx; i--) {
+        h->data[i] = h->data[i - 1];
+    }
+
+    // Insert the new car in its spot
+    h->data[insert_idx] = node;
+    h->size++;
 }
 
-/* Returns the first node in the queue without removing it */
+/* Looks at the first car in line without removing it */
 static WaitNode *heap_peek(const WaitHeap *h) {
     return (h->size > 0) ? h->data[0] : NULL;
 }
 
-/* Removes the first node from the queue and re-sorts it */
+/* Removes the first car and everyone steps forward */
 static void heap_pop(WaitHeap *h) {
     if (h->size == 0) return;
 
-    h->data[0] = h->data[--h->size];
-
-
-    int i = 0;
-    for (;;) {
-        int left  = 2 * i + 1;
-        int right = 2 * i + 2;
-        int best  = i;
-
-        if (left  < h->size && heap_before(h->data[left],  h->data[best])) best = left;
-        if (right < h->size && heap_before(h->data[right], h->data[best])) best = right;
-
-        if (best == i) break;
-
-        WaitNode *tmp   = h->data[i];
-        h->data[i]      = h->data[best];
-        h->data[best]   = tmp;
-        i = best;
+    for (int i = 0; i < h->size - 1; i++) {
+        h->data[i] = h->data[i + 1];
     }
+
+    h->size--;
 }
 
 /* ========================================= */
@@ -115,16 +58,15 @@ static void wake_head(WaitHeap *h) {
     pthread_cond_signal(&head->cv);
 }
 
-/* ==========================================
- * 4. BRIDGE LIFECYCLE
- * ========================================== */
+/* ========================================== */
+/* ============BRIDGE LIFECYCLE============== */
+/* ========================================== */
 
 Bridge *bridge_create(const Config *config) {
     Bridge *b = malloc(sizeof(Bridge));
 
     b->length = config->bridge_length;
 
-    // Allocate and initialize physical slots (1 mutex per meter)
     b->slots = malloc(sizeof(pthread_mutex_t) * b->length);
     for (int i = 0; i < b->length; i++)
         pthread_mutex_init(&b->slots[i], NULL);
@@ -136,8 +78,10 @@ Bridge *bridge_create(const Config *config) {
     b->waiting_west            = 0;
     b->ambulances_waiting_east = 0;
     b->ambulances_waiting_west = 0;
-    b->current_direction       = EAST;
+    b->current_direction        = EAST;
     b->next_seq                = 1;
+    b->passed_count[EAST]      = 0;
+    b->passed_count[WEST]      = 0;
 
     b->east_queue.size = 0;
     b->west_queue.size = 0;
@@ -161,140 +105,145 @@ void bridge_destroy(Bridge *b) {
 /* =========SYNCHRONIZATION LOGIC============ */
 /* ========================================== */
 
-void bridge_enter(Bridge *b, BridgeVehicleInfo *info) {
+void bridge_enter(Bridge *bridge, BridgeVehicleInfo *info) {
+    Direction my_dir = info->direction;
+    WaitHeap *my_queue = (my_dir == EAST) ? &bridge->east_queue : &bridge->west_queue;
     WaitNode node;
     pthread_cond_init(&node.cv, NULL);
     node.ready = 0;
 
-    pthread_mutex_lock(&b->lock);
+    pthread_mutex_lock(&bridge->lock);
 
-    /* Take a ticket and assign priority */
-    node.seq = b->next_seq++;
+    /* 1. Update waiting counters */
+    if (my_dir == EAST) {
+        bridge->waiting_east++;
+        if (info->is_ambulance) bridge->ambulances_waiting_east++;
+    } else {
+        bridge->waiting_west++;
+        if (info->is_ambulance) bridge->ambulances_waiting_west++;
+    }
+
+    /* 2. Take a ticket and priority */
+    node.seq = bridge->next_seq++;
     node.priority = info->is_ambulance ? 0 : (int)node.seq;
+
+    /* 3. Line up in the queue */
+    heap_push(my_queue, &node);
 
     printf("[VEHICLE %d] Arrived at bridge from %s%s\n",
            info->id,
-           info->direction == EAST ? "EAST" : "WEST",
+           my_dir == EAST ? "EAST" : "WEST",
            info->is_ambulance ? " [AMBULANCE]" : "");
 
-    if (info->direction == EAST) {
-        b->waiting_east++;
-        if (info->is_ambulance) b->ambulances_waiting_east++;
-    } else {
-        b->waiting_west++;
-        if (info->is_ambulance) b->ambulances_waiting_west++;
+    /* 4. Do I need to yield to an opposite ambulance? */
+    int opp_amb = (my_dir == EAST) ? bridge->ambulances_waiting_west : bridge->ambulances_waiting_east;
+    int yield_to_ambulance = (!info->is_ambulance && opp_amb > 0);
+    int safe_direction = (bridge->cars_on_bridge == 0 || bridge->current_direction == my_dir);
+
+
+    if (safe_direction && !yield_to_ambulance && heap_peek(my_queue) == &node) {
+        node.ready = 1;
     }
 
-    /* Line up in the corresponding prority queue */
-    WaitHeap *my_queue = (info->direction == EAST) ? &b->east_queue : &b->west_queue;
-    heap_push(my_queue, &node);
+    while (1) {
+        opp_amb = (my_dir == EAST) ? bridge->ambulances_waiting_west : bridge->ambulances_waiting_east;
+        yield_to_ambulance = (!info->is_ambulance && opp_amb > 0);
+        safe_direction = (bridge->cars_on_bridge == 0 || bridge->current_direction == my_dir);
 
-    /* If the bridge is free and we are at the front, we pass */
-    int opp_amb = (info->direction == EAST) ? b->ambulances_waiting_west : b->ambulances_waiting_east;
-    int can_enter = (b->cars_on_bridge == 0 || b->current_direction == info->direction) &&
-                    (info->is_ambulance || opp_amb == 0);
+        int is_my_turn = (heap_peek(my_queue) == &node) && node.ready;
 
-    if (can_enter && heap_peek(my_queue) == &node) {
-        wake_head(my_queue);
+        if (safe_direction && !yield_to_ambulance && is_my_turn) {
+            break; // Letss gooo!
+        }
+
+        pthread_cond_wait(&node.cv, &bridge->lock);
     }
 
-    for (;;) {
-        opp_amb = (info->direction == EAST) ? b->ambulances_waiting_west : b->ambulances_waiting_east;
-
-        int blocked_by_direction = (b->cars_on_bridge > 0 && b->current_direction != info->direction);
-        int blocked_by_opp_amb = (!info->is_ambulance && opp_amb > 0 && b->current_direction == info->direction);
-        int not_my_turn = (heap_peek(my_queue) != &node) || !node.ready;
-
-        if (!blocked_by_direction && !blocked_by_opp_amb && !not_my_turn)
-            break;
-
-        pthread_cond_wait(&node.cv, &b->lock);
-    }
-
-    /* Enter the bridge */
+    /* 5. Entering the bridge */
     heap_pop(my_queue);
 
-    if (info->direction == EAST) {
-        b->waiting_east--;
-        if (info->is_ambulance) b->ambulances_waiting_east--;
+    if (my_dir == EAST) {
+        bridge->waiting_east--;
+        if (info->is_ambulance) bridge->ambulances_waiting_east--;
     } else {
-        b->waiting_west--;
-        if (info->is_ambulance) b->ambulances_waiting_west--;
+        bridge->waiting_west--;
+        if (info->is_ambulance) bridge->ambulances_waiting_west--;
     }
 
-    b->cars_on_bridge++;
-    b->current_direction = info->direction;
+    bridge->cars_on_bridge++;
+    bridge->current_direction = my_dir;
+    bridge->passed_count[my_dir]++;
 
     printf("[BRIDGE] Vehicle %d entered from %s. Cars on bridge: %d\n",
            info->id,
-           info->direction == EAST ? "EAST" : "WEST",
-           b->cars_on_bridge);
+           my_dir == EAST ? "EAST" : "WEST",
+           bridge->cars_on_bridge);
 
-    /* Wake the next vehicle in line if they can also pipeline onto the bridge */
-    opp_amb = (info->direction == EAST) ? b->ambulances_waiting_west : b->ambulances_waiting_east;
-    if (opp_amb == 0 && heap_peek(my_queue) != NULL) {
-        wake_head(my_queue);
+    /* Wake the next car in my line if its safe */
+    opp_amb = (my_dir == EAST) ? bridge->ambulances_waiting_west : bridge->ambulances_waiting_east;
+    if (heap_peek(my_queue) != NULL) {
+        WaitNode *next_in_line = heap_peek(my_queue);
+        int next_is_amb = (next_in_line->priority == 0);
+
+        if (next_is_amb || opp_amb == 0) {
+            next_in_line->ready = 1;
+            pthread_cond_signal(&next_in_line->cv);
+        }
     }
 
-    pthread_mutex_unlock(&b->lock);
+    pthread_mutex_unlock(&bridge->lock);
 
-    /* P(R) */
-    pthread_mutex_lock(&b->slots[0]);
+    /* 6. Lock physical meter */
+    pthread_mutex_lock(&bridge->slots[0]);
     pthread_cond_destroy(&node.cv);
 }
 
 void bridge_advance(Bridge *b, int position) {
-    /* P(R+1), V(R) */
     pthread_mutex_lock(&b->slots[position + 1]);
     pthread_mutex_unlock(&b->slots[position]);
 }
 
-void bridge_leave(Bridge *b, BridgeVehicleInfo *info) {
-    /* V(len-1) */
-    pthread_mutex_unlock(&b->slots[b->length - 1]);
+void bridge_leave(Bridge *bridge, BridgeVehicleInfo *info) {
+    Direction my_dir = info->direction;
+    Direction opp_dir = (my_dir == EAST) ? WEST : EAST;
 
-    pthread_mutex_lock(&b->lock);
+    pthread_mutex_unlock(&bridge->slots[bridge->length - 1]);
 
-    b->cars_on_bridge--;
+    pthread_mutex_lock(&bridge->lock);
+    bridge->cars_on_bridge--;
 
     printf("[BRIDGE] Vehicle %d exited going %s. Cars remaining: %d\n",
            info->id,
-           info->direction == EAST ? "EAST" : "WEST",
-           b->cars_on_bridge);
+           my_dir == EAST ? "EAST" : "WEST",
+           bridge->cars_on_bridge);
 
-    /* If the bridge is empty, decide who goes next */
-    if (b->cars_on_bridge == 0) {
+    if (bridge->cars_on_bridge == 0) {
+        bridge->current_direction = NONE;
 
-        if (b->ambulances_waiting_east > 0) {
-            b->current_direction = EAST;
-            printf("[BRIDGE] PRIORITY: ambulance waiting EAST\n");
-            wake_head(&b->east_queue);
+        WaitHeap *opp_queue = (opp_dir == EAST) ? &bridge->east_queue : &bridge->west_queue;
+        WaitHeap *same_queue = (my_dir == EAST) ? &bridge->east_queue : &bridge->west_queue;
 
-        } else if (b->ambulances_waiting_west > 0) {
-            b->current_direction = WEST;
-            printf("[BRIDGE] PRIORITY: ambulance waiting WEST\n");
-            wake_head(&b->west_queue);
+        WaitNode *opp_head = heap_peek(opp_queue);
+        WaitNode *same_head = heap_peek(same_queue);
 
-        } else if (b->current_direction == EAST) {
-            if (b->waiting_west > 0) {
-                b->current_direction = WEST;
-                printf("[BRIDGE] Switching direction to WEST\n");
-                wake_head(&b->west_queue);
-            } else {
-                wake_head(&b->east_queue);
-            }
-        } else {
-            if (b->waiting_east > 0) {
-                b->current_direction = EAST;
-                printf("[BRIDGE] Switching direction to EAST\n");
-                wake_head(&b->east_queue);
-            } else {
-                wake_head(&b->west_queue);
-            }
+        if (opp_head && opp_head->priority == 0) {
+            printf("[BRIDGE] PRIORITY: ambulance waiting %s\n", opp_dir == EAST ? "EAST" : "WEST");
+            wake_head(opp_queue);
+        }
+        else if (same_head && same_head->priority == 0) {
+            printf("[BRIDGE] PRIORITY: ambulance waiting %s\n", my_dir == EAST ? "EAST" : "WEST");
+            wake_head(same_queue);
+        }
+        else if (opp_head) {
+            printf("[BRIDGE] Switching direction to %s\n", opp_dir == EAST ? "EAST" : "WEST");
+            wake_head(opp_queue);
+        }
+        else if (same_head) {
+            wake_head(same_queue);
         }
     }
 
-    pthread_mutex_unlock(&b->lock);
+    pthread_mutex_unlock(&bridge->lock);
 }
 
 /* ========================================== */
