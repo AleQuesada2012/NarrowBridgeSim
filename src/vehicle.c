@@ -60,7 +60,7 @@ void* vehicle_thread(void *arg)
 
     //printf("[VEHICLE %d] Entered bridge\n", v->id);
 
-    for (int i = 0; i < v->bridge->length - 1; i++)
+    for (int i = 0; i < bridge_get_length(v->bridge) - 1; i++)
     {
         usleep(meter_time * 1e6);
 
