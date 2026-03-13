@@ -34,17 +34,25 @@
 /* =====================  Constants  ========================== */
 /* ============================================================ */
 
-#define WIN_W           1100
-#define WIN_H            700
+#define WIN_W           1366
+#define WIN_H            768
 
-/* Bridge rendering */
-#define BRIDGE_X         120
-#define BRIDGE_Y         260
-#define BRIDGE_W         860
+/* Bridge rendering — centred in the window */
+#define BRIDGE_X         203
+#define BRIDGE_Y         270
+#define BRIDGE_W         960
 #define BRIDGE_H          80
 #define METER_TICK_H      10
 
-/* Queue lanes */
+/*
+ * Each side has a fixed-width zone for its queue.
+ * EAST-bound vehicles (→) wait on the LEFT  (west entrance of bridge).
+ * WEST-bound vehicles (←) wait on the RIGHT (east entrance of bridge).
+ *
+ * Zone layout:
+ *   [EAST queue zone 0..BRIDGE_X-1] [bridge] [WEST queue zone BRIDGE_X+BRIDGE_W..WIN_W-1]
+ */
+#define QUEUE_ZONE_W     200   /* pixels reserved on each side */
 #define QUEUE_LANE_H      50
 #define QUEUE_SLOT_W      36
 
@@ -56,10 +64,10 @@
 
 /* Log panel */
 #define LOG_X             10
-#define LOG_Y            470
-#define LOG_W           1080
-#define LOG_H            220
-#define LOG_MAX_LINES     12
+#define LOG_Y            530
+#define LOG_W           1346
+#define LOG_H            228
+#define LOG_MAX_LINES     13
 #define LOG_LINE_H        17
 
 /* Max vehicles tracked simultaneously */
@@ -88,7 +96,7 @@ static const Colour
     C_ROAD         = COL( 60,  65,  80),
     C_RAIL         = COL(120, 130, 150),
     C_GREEN        = COL( 80, 200,  80),
-    // C_RED_LIGHT    = COL(200,  80,  80),
+    C_RED_LIGHT    = COL(200,  80,  80),
     C_NO_LIGHT     = COL( 60,  60,  60),
     C_CAR_EAST     = COL( 80, 160, 255),
     C_CAR_WEST     = COL(255, 160,  60),
@@ -520,9 +528,7 @@ static void draw_direction_indicator(SDL_Renderer *ren)
     Colour dcol =
         (bridge_dir == DIR_EAST) ? C_EAST_LABEL :
         (bridge_dir == DIR_WEST) ? C_WEST_LABEL  : C_TEXT_DIM;
-
-    int tx = WIN_W/2 - text_width(dstr)/2;
-    draw_text_bold(ren, tx, 46, dstr, dcol);
+    draw_text_bold(ren, WIN_W/2 - text_width(dstr)/2, 46, dstr, dcol);
 }
 
 static void draw_bridge(SDL_Renderer *ren)
@@ -562,8 +568,8 @@ static void draw_bridge(SDL_Renderer *ren)
     }
 
     /* Side labels */
-    draw_text_bold(ren, BRIDGE_X - 68, BRIDGE_Y + BRIDGE_H/2 - 6, "WEST", C_WEST_LABEL);
-    draw_text_bold(ren, BRIDGE_X + BRIDGE_W + 10, BRIDGE_Y + BRIDGE_H/2 - 6, "EAST", C_EAST_LABEL);
+    draw_text_bold(ren, BRIDGE_X - 72, BRIDGE_Y + BRIDGE_H/2 - 6, "WEST", C_WEST_LABEL);
+    draw_text_bold(ren, BRIDGE_X + BRIDGE_W + 12, BRIDGE_Y + BRIDGE_H/2 - 6, "EAST", C_EAST_LABEL);
 }
 
 static void draw_vehicle_on_bridge(SDL_Renderer *ren, const VehicleState *v)
@@ -606,43 +612,72 @@ static void draw_queue(SDL_Renderer *ren, const QueueState *q, int is_east)
     int base_y = BRIDGE_Y + BRIDGE_H + 20;
     int total  = q->total;
     int ambs   = q->ambulances;
-    int show   = (total > 0) ? total : 1;
-    int lw     = show * QUEUE_SLOT_W;
 
-    int lx = is_east
-        ? (BRIDGE_X + BRIDGE_W + 4)
-        : (BRIDGE_X - 4 - lw);
-    if (!is_east && lx < 2) lx = 2;
+    /*
+     * Side assignment (matches physical reality):
+     *   EAST-bound (is_east=1): vehicles travel →, queue on the LEFT side
+     *     (west entrance of bridge).  Zone: x = 0 .. BRIDGE_X-1
+     *   WEST-bound (is_east=0): vehicles travel ←, queue on the RIGHT side
+     *     (east entrance of bridge).  Zone: x = BRIDGE_X+BRIDGE_W .. WIN_W-1
+     *
+     * zone_cx is the horizontal centre of the reserved zone — all geometry
+     * and the label are anchored here so nothing clips regardless of count.
+     */
+    int zone_cx = is_east
+        ? (BRIDGE_X / 2)
+        : (BRIDGE_X + BRIDGE_W + (WIN_W - BRIDGE_X - BRIDGE_W) / 2);
 
-    fill_rect_r(ren, lx, base_y, lw, QUEUE_LANE_H, C_QUEUE_BG, 4);
+    /* Background rect — capped to zone width */
+    int show = (total > 0) ? total : 1;
+    int bg_w = show * QUEUE_SLOT_W;
+    if (bg_w > QUEUE_ZONE_W - 8) bg_w = QUEUE_ZONE_W - 8;
+    int bg_x = zone_cx - bg_w / 2;
 
-    for (int i = 0; i < total && i < 20; i++) {
+    fill_rect_r(ren, bg_x, base_y, bg_w, QUEUE_LANE_H, C_QUEUE_BG, 4);
+
+    /*
+     * Vehicle icons — slot 0 is always the vehicle closest to the bridge
+     * entrance, so it appears nearest the bridge edge in both queues:
+     *   EAST queue (left zone):  slot 0 at rightmost position, grows left
+     *   WEST queue (right zone): slot 0 at leftmost position,  grows right
+     */
+    int max_icons = bg_w / QUEUE_SLOT_W;
+    if (max_icons > 20) max_icons = 20;
+
+    for (int i = 0; i < total && i < max_icons; i++) {
         int amb = (i < ambs);
         Colour c = amb ? C_AMB : (is_east ? C_CAR_EAST : C_CAR_WEST);
 
-        int vx = is_east
-            ? (lx + i * QUEUE_SLOT_W + 4)
-            : (lx + (total - 1 - i) * QUEUE_SLOT_W + 4);
+        int vx;
+        if (is_east)
+            vx = bg_x + bg_w - (i + 1) * QUEUE_SLOT_W + 4; /* slot 0 rightmost */
+        else
+            vx = bg_x + i * QUEUE_SLOT_W + 4;               /* slot 0 leftmost  */
         int vy = base_y + (QUEUE_LANE_H - CAR_H) / 2;
 
         fill_rect_r(ren, vx, vy, CAR_W, CAR_H, c, 3);
         if (amb) {
             set_col(ren, C_WHITE);
-            SDL_RenderDrawLine(ren, vx+CAR_W/2, vy+2, vx+CAR_W/2, vy+CAR_H-2);
-            SDL_RenderDrawLine(ren, vx+2, vy+CAR_H/2, vx+CAR_W-2, vy+CAR_H/2);
+            SDL_RenderDrawLine(ren, vx+CAR_W/2, vy+2,       vx+CAR_W/2, vy+CAR_H-2);
+            SDL_RenderDrawLine(ren, vx+2,       vy+CAR_H/2, vx+CAR_W-2, vy+CAR_H/2);
         }
     }
-    if (total > 20) {
+    if (total > max_icons) {
         char more[16];
-        snprintf(more, sizeof(more), "+%d", total - 20);
-        draw_text(ren, lx + lw - 30, base_y + QUEUE_LANE_H/2 - 6, more, C_TEXT_DIM);
+        snprintf(more, sizeof(more), "+%d", total - max_icons);
+        draw_text(ren, bg_x + 4, base_y + QUEUE_LANE_H/2 - 6, more, C_TEXT_DIM);
     }
 
+    /* Label centred on the zone, clamped so it never clips the screen edges */
     char label[64];
     snprintf(label, sizeof(label),
              "%s queue: %d waiting (%d amb)",
              is_east ? "East" : "West", total, ambs);
-    draw_text(ren, lx, base_y + QUEUE_LANE_H + 8, label,
+    int lw      = text_width(label);
+    int label_x = zone_cx - lw / 2;
+    if (label_x < 4)              label_x = 4;
+    if (label_x + lw > WIN_W - 4) label_x = WIN_W - 4 - lw;
+    draw_text(ren, label_x, base_y + QUEUE_LANE_H + 8, label,
               is_east ? C_EAST_LABEL : C_WEST_LABEL);
 }
 

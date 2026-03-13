@@ -25,11 +25,10 @@ The system can be configured to operate under one of three administrative modes:
 Dependencies
 
 Ubuntu:
-`sudo apt install libx11-dev`
+`sudo apt install libsdl2-dev`
 
-MacOS:
-`brew install --cask xquartz`
-`brew install libx11`
+MacOS X:
+`brew install sdl2`
 
 **Compilation:**
 To compile the project, simply run:

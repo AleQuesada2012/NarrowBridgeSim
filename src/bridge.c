@@ -245,7 +245,7 @@ void bridge_enter(Bridge *b, BridgeVehicleInfo *info)
     b->cars_on_bridge++;
     b->current_direction = info->direction;
 
-    printf("[BRIDGE] Vehicle %d entered from %s (priority %d). Cars on bridge: %d\n",
+    printf("[BRIDGE] Vehicle %d entered headed %s (priority %d). Cars on bridge: %d\n",
            info->id,
            info->direction == EAST ? "EAST" : "WEST",
            node.priority,
