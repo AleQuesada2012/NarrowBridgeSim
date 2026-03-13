@@ -25,6 +25,47 @@ typedef struct {
 } BridgeVehicleInfo;
 
 /* ============================= */
+/* ===== Wait Queue Node   ===== */
+/* ============================= */
+
+/*
+ * One node per vehicle waiting at a bridge entrance.
+ * Allocated on the stack inside bridge_enter() — no heap alloc needed.
+ *
+ * priority:  0 = ambulance (highest), 1..N = arrival sequence (FIFO).
+ * seq:       tie-breaker; lower seq was assigned first.
+ * ready:     set to 1 by bridge_leave/controller before signalling,
+ *            guards against spurious wakeups.
+ */
+typedef struct WaitNode {
+    pthread_cond_t   cv;
+    int              priority;   /* 0 = ambulance, 1+ = normal FIFO order  */
+    unsigned long    seq;        /* global arrival counter, unique per node */
+    int              ready;      /* 1 once this node is at the head & woken */
+    struct WaitNode *parent;
+    struct WaitNode *left;
+    struct WaitNode *right;
+} WaitNode;
+
+/* ============================= */
+/* ===== Priority Min-Heap  ==== */
+/* ============================= */
+
+/*
+ * Binary min-heap embedded in the Bridge struct (one per side).
+ * Ordering: lower priority value wins; equal priority resolved by seq.
+ *
+ * We store pointers into WaitNodes that live on vehicle thread stacks,
+ * so we never free the nodes themselves here.
+ */
+#define WAIT_HEAP_MAX 1024
+
+typedef struct {
+    WaitNode *data[WAIT_HEAP_MAX];
+    int       size;
+} WaitHeap;
+
+/* ============================= */
 /* ======= Opaque Bridge ======= */
 /* ============================= */
 
@@ -33,9 +74,6 @@ typedef struct {
     pthread_mutex_t *slots;
 
     pthread_mutex_t lock;
-
-    pthread_cond_t east_cv;
-    pthread_cond_t west_cv;
 
     int cars_on_bridge;
 
@@ -46,6 +84,13 @@ typedef struct {
     int ambulances_waiting_west;
 
     Direction current_direction;
+
+    /* Per-side priority queues — replace the two shared cond vars */
+    WaitHeap east_queue;
+    WaitHeap west_queue;
+
+    /* Global sequence counter — incremented under bridge->lock */
+    unsigned long next_seq;
 
 } Bridge;
 
@@ -64,8 +109,7 @@ void bridge_destroy(Bridge *bridge);
 void bridge_enter(Bridge *b, BridgeVehicleInfo *info);
 void bridge_leave(Bridge *b, BridgeVehicleInfo *info);
 void bridge_advance(Bridge *b, int position);
-// void bridge_advance(Bridge *b, BridgeVehicleInfo *info, int position); // debugging
-int bridge_get_length(Bridge *bridge);
+int  bridge_get_length(Bridge *bridge);
 
 /* ============================= */
 /* ===== Controller API ======== */
