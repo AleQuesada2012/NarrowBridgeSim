@@ -257,7 +257,6 @@ int bridge_get_cars_on_bridge(Bridge *bridge)
     return cars;
 }
 
-// En bridge.c
 int bridge_get_waiting(Bridge *bridge, Direction dir)
 {
     pthread_mutex_lock(&bridge->lock);

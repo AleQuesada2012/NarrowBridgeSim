@@ -84,10 +84,6 @@ void* semaphore_mode(void *arg)
 /* ===== OFFICER MODE ========== */
 /* ============================= */
 
-// En modes.c
-
-// En modes.c - Versión corregida del modo Officer
-
 void* officer_mode(void *arg)
 {
     ModeArgs *args = (ModeArgs*)arg;
