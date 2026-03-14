@@ -42,6 +42,9 @@ typedef struct {
     int waiting_east;
     int waiting_west;
 
+    int passed_east;
+    int passed_west;
+
     int ambulances_waiting_east;
     int ambulances_waiting_west;
 
@@ -86,5 +89,6 @@ int bridge_get_ambulances_waiting(Bridge *bridge, Direction dir);
 int bridge_get_cars_on_bridge(Bridge *bridge);
 int bridge_get_passed_count(Bridge *bridge, Direction dir);
 void bridge_reset_passed_count(Bridge *bridge, Direction dir);
-
+int bridge_get_waiting(Bridge *bridge, Direction dir);
+int bridge_get_ambulances_waiting(Bridge *bridge, Direction dir);
 #endif

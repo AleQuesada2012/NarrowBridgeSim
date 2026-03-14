@@ -4,6 +4,7 @@
 #include <math.h>
 #include <unistd.h>
 #include <pthread.h>
+#include <stdint.h>
 
 #include "traffic_generator.h"
 #include "vehicle.h"

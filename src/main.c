@@ -3,6 +3,7 @@
 #include "config.h"
 #include "bridge.h"
 #include "traffic_generator.h"
+#include "modes.h"
 
 int main(int argc, char *argv[]) {
 
@@ -67,8 +68,14 @@ int main(int argc, char *argv[]) {
            config.west.k_value);
 
     printf("=====================================\n");
+    
+    Bridge *bridge = bridge_create(&config);
 
-     Bridge *bridge = bridge_create(&config);
+    pthread_t controller = start_mode_controller(&config, bridge);
+    
+    traffic_generator_start(&config, bridge);
+    
+    pthread_cancel(controller);
 
     if (!bridge) {
         fprintf(stderr, "Failed to create bridge.\n");

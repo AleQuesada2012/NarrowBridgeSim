@@ -22,6 +22,9 @@ Bridge *bridge_create(const Config *config)
 
     b->slots = malloc(sizeof(pthread_mutex_t) * b->length);
 
+    b->passed_east = 0;
+    b->passed_west = 0;
+
     for (int i = 0; i < b->length; i++)
         pthread_mutex_init(&b->slots[i], NULL);
 
@@ -186,6 +189,11 @@ void bridge_leave(Bridge *b, BridgeVehicleInfo *info)
     }
 
     pthread_mutex_unlock(&b->lock);
+
+    if (info->direction == EAST)
+        b->passed_east++;
+    else
+        b->passed_west++;
 }
 
 int bridge_get_length(Bridge *bridge)
@@ -194,4 +202,78 @@ int bridge_get_length(Bridge *bridge)
         return -1;
 
     return bridge->length;
+}
+
+
+int bridge_get_passed_count(Bridge *b, Direction dir)
+{
+    pthread_mutex_lock(&b->lock);
+
+    int value = (dir == EAST) ? b->passed_east : b->passed_west;
+
+    pthread_mutex_unlock(&b->lock);
+
+    return value;
+}
+
+void bridge_reset_passed_count(Bridge *b, Direction dir)
+{
+    pthread_mutex_lock(&b->lock);
+
+    if (dir == EAST)
+        b->passed_east = 0;
+    else
+        b->passed_west = 0;
+
+    pthread_mutex_unlock(&b->lock);
+}
+
+void bridge_set_direction(Bridge *bridge, Direction dir)
+{
+    pthread_mutex_lock(&bridge->lock);
+
+    bridge->current_direction = dir;
+
+    pthread_cond_broadcast(&bridge->east_cv);
+    pthread_cond_broadcast(&bridge->west_cv);
+
+    pthread_mutex_unlock(&bridge->lock);
+}
+
+Direction bridge_get_direction(Bridge *bridge)
+{
+    return bridge->current_direction;
+}
+
+int bridge_get_cars_on_bridge(Bridge *bridge)
+{
+    if (!bridge)
+        return 0; // o -1 si quieres indicar error
+
+    pthread_mutex_lock(&bridge->lock);
+    int cars = bridge->cars_on_bridge;
+    pthread_mutex_unlock(&bridge->lock);
+
+    return cars;
+}
+
+// En bridge.c
+int bridge_get_waiting(Bridge *bridge, Direction dir)
+{
+    pthread_mutex_lock(&bridge->lock);
+    int waiting = (dir == EAST) ? bridge->waiting_east : bridge->waiting_west;
+    pthread_mutex_unlock(&bridge->lock);
+    return waiting;
+}
+
+
+int bridge_get_ambulances_waiting(Bridge *bridge, Direction dir)
+{
+    if (!bridge) return 0;
+    
+    pthread_mutex_lock(&bridge->lock);
+    int waiting = (dir == EAST) ? bridge->ambulances_waiting_east : bridge->ambulances_waiting_west;
+    pthread_mutex_unlock(&bridge->lock);
+    
+    return waiting;
 }
