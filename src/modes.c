@@ -40,40 +40,51 @@ void* carnage_mode()
 void* semaphore_mode(void *arg)
 {
     ModeArgs *args = (ModeArgs*)arg;
+    Bridge *b = args->bridge;
 
-    Bridge *bridge = args->bridge;
-    const Config *config = args->config;
+    int east_time = args->config->east.green_time;
+    int west_time = args->config->west.green_time;
 
-    int east_time = config->east.green_time;
-    int west_time = config->west.green_time;
-
-    printf("[MODE] Semaphore mode active\n");
-
-    time_t start = time(NULL);
-
-    while (time(NULL) - start < config->simulation_time)
+    while (1)
     {
-        /* GREEN EAST */
+        /* ================= EAST ================= */
         printf("[SEMAPHORE] GREEN EAST (%d sec)\n", east_time);
 
-        bridge_set_direction(bridge, EAST);
+        bridge_set_direction(b, EAST);
 
-        sleep(east_time);
+        int t = 0;
+        while (t < east_time)
+        {
+            sleep(1);
+            t++;
 
-        /* Wait until bridge empty before switching */
-        while (bridge_get_cars_on_bridge(bridge) > 0)
-            usleep(100000);
+            /* PRIORIDAD AMBULANCIAS */
+            if (bridge_get_ambulances_waiting(b, WEST) > 0)
+                break;
+        }
+
+        /* Esperar a que el puente quede vacío */
+        bridge_wait_until_empty(b);
 
 
-        /* GREEN WEST */
+        /* ================= WEST ================= */
         printf("[SEMAPHORE] GREEN WEST (%d sec)\n", west_time);
 
-        bridge_set_direction(bridge, WEST);
+        bridge_set_direction(b, WEST);
 
-        sleep(west_time);
+        t = 0;
+        while (t < west_time)
+        {
+            sleep(1);
+            t++;
 
-        while (bridge_get_cars_on_bridge(bridge) > 0)
-            usleep(100000);
+            /* PRIORIDAD AMBULANCIAS */
+            if (bridge_get_ambulances_waiting(b, EAST) > 0)
+                break;
+        }
+
+        bridge_wait_until_empty(b);
+
     }
 
     return NULL;
@@ -87,131 +98,64 @@ void* semaphore_mode(void *arg)
 void* officer_mode(void *arg)
 {
     ModeArgs *args = (ModeArgs*)arg;
+    Bridge *b = args->bridge;
 
-    Bridge *bridge = args->bridge;
-    const Config *config = args->config;
+    int k_east = args->config->east.k_value;
+    int k_west = args->config->west.k_value;
 
-    int east_k = config->east.k_value;
-    int west_k = config->west.k_value;
-
-    printf("[MODE] Officer mode active\n");
-    printf("[OFFICER] East K=%d, West K=%d\n", east_k, west_k);
-
-    time_t start = time(NULL);
-    Direction current_dir;
-    int vehicles_passed_in_phase = 0;
-    int target_k;
-
-    while (time(NULL) - start < config->simulation_time)
+    while (1)
     {
-        // --- Decidir qué sentido activar ---
-        // Prioridad 1: ¿Hay ambulancias esperando?
-        if (bridge_get_ambulances_waiting(bridge, EAST) > 0) {
-            current_dir = EAST;
-            printf("[OFFICER] PRIORITY: Ambulances waiting EAST\n");
-        } else if (bridge_get_ambulances_waiting(bridge, WEST) > 0) {
-            current_dir = WEST;
-            printf("[OFFICER] PRIORITY: Ambulances waiting WEST\n");
-        }
-        // Prioridad 2: Sentido con vehículos esperando (alternamos justamente)
-        else if (bridge_get_waiting(bridge, EAST) > 0 && bridge_get_waiting(bridge, WEST) == 0) {
-            current_dir = EAST;
-            printf("[OFFICER] Only EAST has waiting vehicles\n");
-        } else if (bridge_get_waiting(bridge, WEST) > 0 && bridge_get_waiting(bridge, EAST) == 0) {
-            current_dir = WEST;
-            printf("[OFFICER] Only WEST has waiting vehicles\n");
-        } else if (bridge_get_waiting(bridge, EAST) > 0 && bridge_get_waiting(bridge, WEST) > 0) {
-            // Ambos lados tienen vehículos - alternamos basado en el último sentido
-            Direction last_dir = bridge_get_direction(bridge);
-            current_dir = (last_dir == EAST) ? WEST : EAST;
-            printf("[OFFICER] Both sides waiting, alternating to %s\n", 
-                   current_dir == EAST ? "EAST" : "WEST");
-        } else {
-            // No hay nadie esperando, damos un respiro
-            printf("[OFFICER] No vehicles waiting, sleeping...\n");
-            usleep(500000);
-            continue;
-        }
+        /* ================= EAST ================= */
+        bridge_set_direction(b, EAST);
+        printf("[OFFICER] Allowing EAST (%d cars)\n", k_east);
 
-        // Establecer la dirección y preparar contadores
-        bridge_set_direction(bridge, current_dir);
-        target_k = (current_dir == EAST) ? east_k : west_k;
-        vehicles_passed_in_phase = 0;
-        
-        printf("[OFFICER] ALLOWING %s for up to %d vehicles\n", 
-               current_dir == EAST ? "EAST" : "WEST", target_k);
-        
-        // Reiniciamos el contador de pasados para este sentido
-        bridge_reset_passed_count(bridge, current_dir);
+        int passed = 0;
 
-        // --- Permitir el paso de vehículos ---
-        while (vehicles_passed_in_phase < target_k) {
-            // Verificar tiempo de simulación
-            if (time(NULL) - start >= config->simulation_time) {
-                printf("[OFFICER] Simulation time ending, waiting for bridge to empty\n");
-                // Esperamos a que el puente se vacíe antes de salir
-                while (bridge_get_cars_on_bridge(bridge) > 0) {
-                    usleep(100000);
-                }
-                return NULL;
-            }
+        while (passed < k_east)
+        {
+            sleep(1);
 
-            int current_passed = bridge_get_passed_count(bridge, current_dir);
-            
-            // Si aumentó el contador, actualizamos
-            if (current_passed > vehicles_passed_in_phase) {
-                vehicles_passed_in_phase = current_passed;
-                printf("[OFFICER] %d/%d vehicles passed in %s\n", 
-                       vehicles_passed_in_phase, target_k,
-                       current_dir == EAST ? "EAST" : "WEST");
-            }
-
-            // --- VERIFICAR CONDICIONES PARA CAMBIO ANTICIPADO ---
-            
-            // Condición 1: No hay más vehículos esperando en este sentido Y el puente está vacío
-            if (bridge_get_waiting(bridge, current_dir) == 0 && 
-                bridge_get_cars_on_bridge(bridge) == 0) {
-                printf("[OFFICER] No more vehicles waiting in %s. Switching early (only %d passed)\n",
-                       current_dir == EAST ? "EAST" : "WEST", vehicles_passed_in_phase);
+            /* PRIORIDAD AMBULANCIAS */
+            if (bridge_get_ambulances_waiting(b, WEST) > 0)
                 break;
-            }
-            
-            // Condición 2: Hay ambulancias esperando en el otro sentido (prioridad)
-            if (current_dir == EAST && bridge_get_ambulances_waiting(bridge, WEST) > 0) {
-                printf("[OFFICER] Ambulance waiting WEST! Finishing EAST phase early\n");
-                // Esperamos a que se vacíe el puente y cambiamos
-                while (bridge_get_cars_on_bridge(bridge) > 0) {
-                    usleep(100000);
-                }
-                break;
-            }
-            if (current_dir == WEST && bridge_get_ambulances_waiting(bridge, EAST) > 0) {
-                printf("[OFFICER] Ambulance waiting EAST! Finishing WEST phase early\n");
-                while (bridge_get_cars_on_bridge(bridge) > 0) {
-                    usleep(100000);
-                }
-                break;
-            }
 
-            usleep(100000); // 100ms de pausa para no saturar CPU
+            /* contar carros que pasan */
+            int current = bridge_get_passed_count(b, EAST);
+
+            if (current > passed)
+                passed = current;
         }
 
-        // Esperar a que el puente esté vacío antes de cambiar de sentido
-        printf("[OFFICER] Waiting for bridge to empty...\n");
-        while (bridge_get_cars_on_bridge(bridge) > 0) {
-            if (time(NULL) - start >= config->simulation_time) {
-                return NULL;
-            }
-            usleep(100000);
-        }
-        
-        printf("[OFFICER] Bridge is empty. ");
+        bridge_reset_passed_count(b, EAST);
 
-        // Pequeña pausa para que el oficial "observe"
-        usleep(300000);
+        bridge_wait_until_empty(b);
+
+
+        /* ================= WEST ================= */
+        bridge_set_direction(b, WEST);
+        printf("[OFFICER] Allowing WEST (%d cars)\n", k_west);
+
+        passed = 0;
+
+        while (passed < k_west)
+        {
+            sleep(1);
+
+            if (bridge_get_ambulances_waiting(b, EAST) > 0)
+                break;
+
+            int current = bridge_get_passed_count(b, WEST);
+
+            if (current > passed)
+                passed = current;
+        }
+
+        bridge_reset_passed_count(b, WEST);
+
+        bridge_wait_until_empty(b);
+
     }
 
-    printf("[OFFICER] Mode finished\n");
     return NULL;
 }
 

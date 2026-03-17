@@ -37,6 +37,8 @@ typedef struct {
     pthread_cond_t east_cv;
     pthread_cond_t west_cv;
 
+    pthread_cond_t empty_cv;
+
     int cars_on_bridge;
 
     int waiting_east;
@@ -91,4 +93,6 @@ int bridge_get_passed_count(Bridge *bridge, Direction dir);
 void bridge_reset_passed_count(Bridge *bridge, Direction dir);
 int bridge_get_waiting(Bridge *bridge, Direction dir);
 int bridge_get_ambulances_waiting(Bridge *bridge, Direction dir);
+void bridge_wait_until_empty(Bridge *bridge);
+
 #endif

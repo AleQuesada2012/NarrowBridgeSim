@@ -82,7 +82,7 @@ int main(int argc, char *argv[]) {
         return EXIT_FAILURE;
     }
 
-    traffic_generator_start(&config, bridge);
+    //traffic_generator_start(&config, bridge);
 
     bridge_destroy(bridge);
 
