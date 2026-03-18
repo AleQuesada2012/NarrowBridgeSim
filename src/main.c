@@ -32,19 +32,27 @@ int main(int argc, char *argv[]) {
     }
 
     printf("\n--- EAST SIDE ---\n");
-    printf("Arrival mean: %.2f\n",        config.east.arrival_mean);
-    printf("Speed range: %d - %d\n",      config.east.speed_min, config.east.speed_max);
+    printf("Arrival mean: %.2f\n",         config.east.arrival_mean);
+    printf("Speed range: %d - %d\n",       config.east.speed_min, config.east.speed_max);
     printf("Ambulance percentage: %.2f\n", config.east.ambulance_percentage);
-    printf("Green time: %d\n",            config.east.green_time);
-    printf("K value: %d\n",               config.east.k_value);
+    printf("Green time: %d\n",             config.east.green_time);
+    printf("K value: %d\n",                config.east.k_value);
 
     printf("\n--- WEST SIDE ---\n");
-    printf("Arrival mean: %.2f\n",        config.west.arrival_mean);
-    printf("Speed range: %d - %d\n",      config.west.speed_min, config.west.speed_max);
+    printf("Arrival mean: %.2f\n",         config.west.arrival_mean);
+    printf("Speed range: %d - %d\n",       config.west.speed_min, config.west.speed_max);
     printf("Ambulance percentage: %.2f\n", config.west.ambulance_percentage);
-    printf("Green time: %d\n",            config.west.green_time);
-    printf("K value: %d\n",               config.west.k_value);
+    printf("Green time: %d\n",             config.west.green_time);
+    printf("K value: %d\n",                config.west.k_value);
     printf("=====================================\n");
+
+    /* Structured line for the GUI — emitted before any vehicle activity */
+    switch (config.mode) {
+        case MODE_CARNAGE:   printf("[MODE CARNAGE]\n");   break;
+        case MODE_SEMAPHORE: printf("[MODE SEMAPHORE]\n"); break;
+        case MODE_OFFICER:   printf("[MODE OFFICER]\n");   break;
+    }
+    fflush(stdout);
 
     Bridge *bridge = bridge_create(&config);
     if (!bridge) {
@@ -52,14 +60,12 @@ int main(int argc, char *argv[]) {
         return EXIT_FAILURE;
     }
 
-    /* Start the semaphore controller only in SEMAPHORE mode */
     SemaphoreCtrl sem_ctrl;
     if (config.mode == MODE_SEMAPHORE)
         semaphore_ctrl_start(&sem_ctrl, bridge, &config);
 
     traffic_generator_start(&config, bridge);
 
-    /* Stop the semaphore controller after all traffic has finished */
     if (config.mode == MODE_SEMAPHORE)
         semaphore_ctrl_stop(&sem_ctrl);
 
