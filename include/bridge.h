@@ -11,77 +11,77 @@
 typedef enum {
     EAST = 0,
     WEST = 1,
-    NONE = 2 // used at the start or when empty
+    NONE = 2
 } Direction;
-/* ========================================= */
-/* ========INTERNAL STRUCTURES============== */
-/* ========================================= */
 
+/* ============================= */
+/* ========= FIFO QUEUE ======== */
+/* ============================= */
+
+/*
+ * One node per waiting vehicle, allocated on the vehicle thread's stack.
+ * Vehicles join the tail in strict arrival order — no reordering ever.
+ *
+ * The bridge inspects head->is_ambulance to apply priority rules without
+ * needing any separate "entry slot" structure.
+ */
+typedef struct FifoNode {
+    pthread_cond_t   cv;           /* this vehicle sleeps here            */
+    int              is_ambulance; /* cached so the bridge can peek it    */
+    int              id;           /* for logging                         */
+    struct FifoNode *next;
+} FifoNode;
 
 typedef struct {
-    int priority;           // 0 = Ambulance (Highest), 1+ = Normal vehicle
-    int seq;                // Ticket number like Lottery
-    pthread_cond_t cv;
-    int ready;
-} WaitNode;
+    FifoNode *head;   /* next vehicle to enter the bridge */
+    FifoNode *tail;   /* most recently arrived vehicle    */
+    int       size;
+} FifoQueue;
 
-
-typedef struct {
-    WaitNode *data[1000];
-    int size;
-} WaitHeap;
-
-
+/* ============================= */
+/* ========== BRIDGE =========== */
+/* ============================= */
 
 struct Bridge {
-    int length;
-    pthread_mutex_t lock;
-    pthread_mutex_t *slots;
+    int              length;
+    pthread_mutex_t  lock;
+    pthread_mutex_t *slots;        /* per-meter mutex array               */
 
-    WaitHeap east_queue;
-    WaitHeap west_queue;
+    FifoQueue        queue[2];     /* one FIFO per side, indexed by Direction */
 
-    int cars_on_bridge;
-    Direction current_direction;
-    int next_seq;
+    int              cars_on_bridge;
+    Direction        current_direction;
 
-    int waiting_east;
-    int waiting_west;
-    int ambulances_waiting_east;
-    int ambulances_waiting_west;
+    /* Counters kept for logging */
+    int              waiting[2];
+    int              ambulances_waiting[2];
 
-    int passed_count[2];
+    int              passed_count[2];
 };
+
 /* ============================= */
 /* ======= Vehicle Struct ====== */
 /* ============================= */
 
 typedef struct {
-    int id;
+    int       id;
     Direction direction;
-    int is_ambulance;
+    int       is_ambulance;
 } BridgeVehicleInfo;
 
-/* ============================= */
-/* ======= Opaque Bridge ======= */
-/* ============================= */
 typedef struct Bridge Bridge;
 
-
 /* ============================= */
-/* ===== Initialization ======== */
-/* ============================= */
-
-Bridge* bridge_create(const Config *config);
-void bridge_destroy(Bridge *bridge);
-
-/* ============================= */
-/* ===== Vehicle Interaction ===== */
+/* ===== Public Interface  ===== */
 /* ============================= */
 
-void bridge_enter(Bridge *bridge, BridgeVehicleInfo *info);
-void bridge_advance(Bridge *bridge, int position);
-void bridge_leave(Bridge *bridge, BridgeVehicleInfo *info);
+Bridge *bridge_create(const Config *config);
+void    bridge_destroy(Bridge *bridge);
 
-int bridge_get_length(Bridge *bridge);
+void    bridge_enter(Bridge *bridge, BridgeVehicleInfo *info);
+void    bridge_advance(Bridge *bridge, int position);
+void    bridge_leave(Bridge *bridge, BridgeVehicleInfo *info);
+
+int     bridge_get_length(Bridge *bridge);
+
 #endif
