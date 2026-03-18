@@ -39,10 +39,17 @@ static void fifo_pop(FifoQueue *q)
  */
 static void emit_queue(const Bridge *b, Direction side)
 {
-    printf("[QUEUE %s %d %d]\n",
-           side == EAST ? "EAST" : "WEST",
-           b->waiting[side],
-           b->ambulances_waiting[side]);
+    /*
+     * Format: [QUEUE EAST|WEST id0:amb0 id1:amb1 ...]
+     *
+     * Each token is  <vehicle_id>:<is_ambulance>  in head-to-tail FIFO
+     * order, so the GUI renders icons in exact arrival order.
+     * An empty queue emits [QUEUE EAST] with no tokens.
+     */
+    printf("[QUEUE %s", side == EAST ? "EAST" : "WEST");
+    for (const FifoNode *n = b->queue[side].head; n; n = n->next)
+        printf(" %d:%d", n->id, n->is_ambulance);
+    printf("]\n");
     fflush(stdout);
 }
 

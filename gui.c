@@ -81,8 +81,7 @@ static const Colour
     C_LIGHT_RED   = COL(220,  50,  50),   /* traffic light red    */
     C_LIGHT_OFF   = COL( 40,  40,  40),   /* unlit bulb           */
     C_LIGHT_BODY  = COL( 30,  30,  30),   /* light housing        */
-    C_FLOW_GREEN  = COL( 80, 200,  80),   /* direction indicator  */
-    C_NO_LIGHT    = COL( 60,  60,  60),
+    // C_FLOW_GREEN  = COL( 80, 200,  80),   /* direction indicator  */
     C_CAR_EAST    = COL( 80, 160, 255),
     C_CAR_WEST    = COL(255, 160,  60),
     C_AMB         = COL(255,  60,  60),
@@ -301,7 +300,13 @@ typedef struct {
     int    active;
 } VehicleState;
 
-typedef struct { int total; int ambulances; } QueueState;
+#define QUEUE_MAX_DISPLAY 64   /* max vehicles tracked per side in the GUI */
+
+typedef struct {
+    int total;                          /* number of vehicles currently waiting */
+    int ids[QUEUE_MAX_DISPLAY];         /* vehicle id,  index 0 = FIFO head     */
+    int is_ambulance[QUEUE_MAX_DISPLAY];/* ambulance flag, same indexing         */
+} QueueState;
 
 /* ============================================================ */
 /* =====================  Shared State  ======================= */
@@ -312,8 +317,8 @@ static pthread_mutex_t state_lock = PTHREAD_MUTEX_INITIALIZER;
 static VehicleState vehicles[MAX_VEHICLES];
 static int          bridge_length     = 10;
 static GuiDir       bridge_dir        = DIR_NONE;
-static QueueState   queue_east        = {0, 0};
-static QueueState   queue_west        = {0, 0};
+static QueueState   queue_east;   /* zero-initialised by C static storage */
+static QueueState   queue_west;
 static int          total_east_passed = 0;
 static int          total_west_passed = 0;
 static int          sim_done          = 0;
@@ -410,12 +415,37 @@ static void *parser_thread(void *arg)
             }
         }
 
-        /* [QUEUE EAST|WEST total ambulances] */
+        /*
+         * [QUEUE EAST|WEST id0:amb0 id1:amb1 ...]
+         *
+         * Tokens after the side name are  <id>:<is_ambulance>  in FIFO
+         * head-to-tail order.  We parse them into the ordered arrays so
+         * draw_queue can render icons in exact arrival order.
+         */
         else if (strncmp(line, "[QUEUE ", 7) == 0) {
-            char side[8]; int total, ambs;
-            if (sscanf(line, "[QUEUE %7[A-Z] %d %d]", side, &total, &ambs) == 3) {
-                if (strcmp(side,"EAST")==0) { queue_east.total=total; queue_east.ambulances=ambs; }
-                else                       { queue_west.total=total; queue_west.ambulances=ambs; }
+            char side[8];
+            if (sscanf(line, "[QUEUE %7[A-Z]", side) == 1) {
+                QueueState *qs = (strcmp(side,"EAST")==0) ? &queue_east : &queue_west;
+                qs->total = 0;
+
+                /* Walk the rest of the line token by token */
+                const char *p = line;
+                /* skip past "[QUEUE SIDE" */
+                p = strchr(p, ' '); if (p) p++;  /* skip "[QUEUE" space */
+                p = strchr(p, ' ');               /* find space before first token */
+
+                while (p && qs->total < QUEUE_MAX_DISPLAY) {
+                    int id, amb;
+                    if (sscanf(p, " %d:%d", &id, &amb) == 2) {
+                        qs->ids[qs->total]          = id;
+                        qs->is_ambulance[qs->total] = amb;
+                        qs->total++;
+                        /* advance past this token */
+                        p = strchr(p + 1, ' ');
+                    } else {
+                        break;
+                    }
+                }
             }
         }
 
@@ -497,16 +527,16 @@ static void draw_header(SDL_Renderer *ren, int done)
 /* ---- Carnage mode: simple flow-direction indicator ---- */
 static void draw_carnage_indicator(SDL_Renderer *ren)
 {
-    int east_on = (bridge_dir == DIR_EAST);
-    int west_on = (bridge_dir == DIR_WEST);
+    // int east_on = (bridge_dir == DIR_EAST);
+    // int west_on = (bridge_dir == DIR_WEST);
 
-    fill_circle(ren, WIN_W/2 - 80, 52, 10,
-                west_on ? C_FLOW_GREEN : C_NO_LIGHT);
-    draw_text(ren, WIN_W/2 - 93, 68, "<-W", C_TEXT_DIM);
+    // fill_circle(ren, WIN_W/2 - 80, 52, 10,
+    //            west_on ? C_FLOW_GREEN : C_NO_LIGHT);
+    // draw_text(ren, WIN_W/2 - 93, 68, "W->", C_TEXT_DIM);
 
-    fill_circle(ren, WIN_W/2 + 80, 52, 10,
-                east_on ? C_FLOW_GREEN : C_NO_LIGHT);
-    draw_text(ren, WIN_W/2 + 70, 68, "->E", C_TEXT_DIM);
+    // fill_circle(ren, WIN_W/2 + 80, 52, 10,
+    //            east_on ? C_FLOW_GREEN : C_NO_LIGHT);
+    // draw_text(ren, WIN_W/2 + 70, 68, "->E", C_TEXT_DIM);
 
     const char *dstr =
         bridge_dir == DIR_EAST ? "EASTBOUND" :
@@ -573,7 +603,7 @@ static void draw_semaphore_indicator(SDL_Renderer *ren)
 
     /* WEST light — left side */
     draw_traffic_light(ren, WIN_W/2 - 100, cy,
-                       light[1], "<-W", C_WEST_LABEL);
+                       light[1], "W->", C_WEST_LABEL);
 
     /* Centre label: which side is currently flowing */
     const char *dstr =
@@ -657,7 +687,6 @@ static void draw_queue(SDL_Renderer *ren, const QueueState *q, int is_east)
 {
     int base_y = BRIDGE_Y + BRIDGE_H + 20;
     int total  = q->total;
-    int ambs   = q->ambulances;
 
     int zone_cx = is_east
         ? (BRIDGE_X / 2)
@@ -673,16 +702,39 @@ static void draw_queue(SDL_Renderer *ren, const QueueState *q, int is_east)
     int max_icons = bg_w / QUEUE_SLOT_W;
     if (max_icons > 20) max_icons = 20;
 
+    /*
+     * Render icons in FIFO order: q->ids[0] is the head (closest to the
+     * bridge), q->ids[total-1] is the tail (most recently arrived).
+     *
+     * EAST queue (left zone):  head goes at the RIGHTMOST position (nearest
+     *   the bridge mouth), tail grows leftward.  Icon for index i sits at
+     *   position (max_icons - 1 - i) from the left edge.
+     *
+     * WEST queue (right zone): head goes at the LEFTMOST position (nearest
+     *   the bridge mouth), tail grows rightward.  Icon for index i sits at
+     *   position i from the left edge.
+     *
+     * In both cases index 0 (head) is visually closest to the bridge.
+     */
+    int ambs = 0;
     for (int i = 0; i < total && i < max_icons; i++) {
-        int amb = (i < ambs);
+        int amb = q->is_ambulance[i];
+        if (amb) ambs++;
         Colour c = amb ? C_AMB : (is_east ? C_CAR_EAST : C_CAR_WEST);
 
         int vx = is_east
-            ? (bg_x + bg_w - (i+1)*QUEUE_SLOT_W + 4)
-            : (bg_x + i*QUEUE_SLOT_W + 4);
+            ? (bg_x + bg_w - (i+1)*QUEUE_SLOT_W + 4)  /* head = rightmost */
+            : (bg_x + i*QUEUE_SLOT_W + 4);              /* head = leftmost  */
         int vy = base_y + (QUEUE_LANE_H - CAR_H)/2;
 
         fill_rect_r(ren, vx, vy, CAR_W, CAR_H, c, 3);
+
+        /* Vehicle id label */
+        char idlbl[8]; snprintf(idlbl, sizeof(idlbl), "%d", q->ids[i]);
+        draw_text(ren, vx + CAR_W/2 - text_width(idlbl)/2,
+                       vy + CAR_H/2 - (FONT_CHAR_H*FONT_SCALE)/2,
+                       idlbl, C_BLACK);
+
         if (amb) {
             set_col(ren, C_WHITE);
             SDL_RenderDrawLine(ren, vx+CAR_W/2, vy+2,       vx+CAR_W/2, vy+CAR_H-2);
