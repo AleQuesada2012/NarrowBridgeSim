@@ -3,81 +3,66 @@
 #include "config.h"
 #include "bridge.h"
 #include "traffic_generator.h"
+#include "semaphore_ctrl.h"
 
 int main(int argc, char *argv[]) {
 
     Config config;
 
-    /* Determinar archivo de configuración */
     const char *config_file = "bridge.config";
-
-    if (argc > 1) {
+    if (argc > 1)
         config_file = argv[1];
-    }
 
-    /* Cargar configuración */
     if (!config_load(config_file, &config)) {
         fprintf(stderr, "Failed to load configuration file.\n");
         return EXIT_FAILURE;
     }
 
-    /* Mostrar resumen básico */
     printf("=====================================\n");
     printf(" Bridge Simulation Configuration\n");
     printf("=====================================\n");
-
     printf("Bridge length: %d meters\n", config.bridge_length);
     printf("Simulation time: %d seconds\n", config.simulation_time);
 
     printf("\nMode: ");
-    switch(config.mode) {
-        case MODE_CARNAGE:
-            printf("CARNAGE\n");
-            break;
-        case MODE_SEMAPHORE:
-            printf("SEMAPHORE\n");
-            break;
-        case MODE_OFFICER:
-            printf("OFFICER\n");
-            break;
+    switch (config.mode) {
+        case MODE_CARNAGE:   printf("CARNAGE\n");   break;
+        case MODE_SEMAPHORE: printf("SEMAPHORE\n"); break;
+        case MODE_OFFICER:   printf("OFFICER\n");   break;
     }
 
     printf("\n--- EAST SIDE ---\n");
-    printf("Arrival mean: %.2f\n", config.east.arrival_mean);
-    printf("Speed range: %d - %d\n",
-           config.east.speed_min,
-           config.east.speed_max);
-    printf("Ambulance percentage: %.2f\n",
-           config.east.ambulance_percentage);
-    printf("Green time: %d\n",
-           config.east.green_time);
-    printf("K value: %d\n",
-           config.east.k_value);
+    printf("Arrival mean: %.2f\n",        config.east.arrival_mean);
+    printf("Speed range: %d - %d\n",      config.east.speed_min, config.east.speed_max);
+    printf("Ambulance percentage: %.2f\n", config.east.ambulance_percentage);
+    printf("Green time: %d\n",            config.east.green_time);
+    printf("K value: %d\n",               config.east.k_value);
 
     printf("\n--- WEST SIDE ---\n");
-    printf("Arrival mean: %.2f\n", config.west.arrival_mean);
-    printf("Speed range: %d - %d\n",
-           config.west.speed_min,
-           config.west.speed_max);
-    printf("Ambulance percentage: %.2f\n",
-           config.west.ambulance_percentage);
-    printf("Green time: %d\n",
-           config.west.green_time);
-    printf("K value: %d\n",
-           config.west.k_value);
-
+    printf("Arrival mean: %.2f\n",        config.west.arrival_mean);
+    printf("Speed range: %d - %d\n",      config.west.speed_min, config.west.speed_max);
+    printf("Ambulance percentage: %.2f\n", config.west.ambulance_percentage);
+    printf("Green time: %d\n",            config.west.green_time);
+    printf("K value: %d\n",               config.west.k_value);
     printf("=====================================\n");
 
-     Bridge *bridge = bridge_create(&config);
-
+    Bridge *bridge = bridge_create(&config);
     if (!bridge) {
         fprintf(stderr, "Failed to create bridge.\n");
         return EXIT_FAILURE;
     }
 
+    /* Start the semaphore controller only in SEMAPHORE mode */
+    SemaphoreCtrl sem_ctrl;
+    if (config.mode == MODE_SEMAPHORE)
+        semaphore_ctrl_start(&sem_ctrl, bridge, &config);
+
     traffic_generator_start(&config, bridge);
 
-    bridge_destroy(bridge);
+    /* Stop the semaphore controller after all traffic has finished */
+    if (config.mode == MODE_SEMAPHORE)
+        semaphore_ctrl_stop(&sem_ctrl);
 
+    bridge_destroy(bridge);
     return EXIT_SUCCESS;
 }

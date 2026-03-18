@@ -14,27 +14,31 @@ typedef enum {
     NONE = 2
 } Direction;
 
+typedef enum {
+    LIGHT_GREEN = 0,
+    LIGHT_RED   = 1,
+    LIGHT_OFF   = 2   /* CARNAGE and OFFICER modes */
+} LightState;
+
 /* ============================= */
 /* ========= FIFO QUEUE ======== */
 /* ============================= */
 
 /*
- * One node per waiting vehicle, allocated on the vehicle thread's stack.
+ * One node per waiting vehicle, stack-allocated inside bridge_enter().
  * Vehicles join the tail in strict arrival order — no reordering ever.
- *
- * The bridge inspects head->is_ambulance to apply priority rules without
- * needing any separate "entry slot" structure.
+ * The bridge inspects head->is_ambulance to apply priority rules.
  */
 typedef struct FifoNode {
-    pthread_cond_t   cv;           /* this vehicle sleeps here            */
-    int              is_ambulance; /* cached so the bridge can peek it    */
-    int              id;           /* for logging                         */
+    pthread_cond_t   cv;
+    int              is_ambulance;
+    int              id;            /* for logging */
     struct FifoNode *next;
 } FifoNode;
 
 typedef struct {
-    FifoNode *head;   /* next vehicle to enter the bridge */
-    FifoNode *tail;   /* most recently arrived vehicle    */
+    FifoNode *head;
+    FifoNode *tail;
     int       size;
 } FifoQueue;
 
@@ -45,17 +49,22 @@ typedef struct {
 struct Bridge {
     int              length;
     pthread_mutex_t  lock;
-    pthread_mutex_t *slots;        /* per-meter mutex array               */
+    pthread_mutex_t *slots;
 
-    FifoQueue        queue[2];     /* one FIFO per side, indexed by Direction */
+    Mode             mode;
+
+    /* One FIFO queue per side (index by Direction: EAST=0, WEST=1) */
+    FifoQueue        queue[2];
+
+    /* Traffic light state per side — only meaningful in SEMAPHORE mode */
+    LightState       light[2];
 
     int              cars_on_bridge;
     Direction        current_direction;
 
-    /* Counters kept for logging */
+    /* Counters for logging */
     int              waiting[2];
     int              ambulances_waiting[2];
-
     int              passed_count[2];
 };
 
@@ -83,5 +92,11 @@ void    bridge_advance(Bridge *bridge, int position);
 void    bridge_leave(Bridge *bridge, BridgeVehicleInfo *info);
 
 int     bridge_get_length(Bridge *bridge);
+
+/*
+ * Called by the semaphore thread to flip the lights.
+ * Acquires bridge->lock internally.
+ */
+void    bridge_set_light(Bridge *bridge, Direction green_side);
 
 #endif

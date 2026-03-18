@@ -4,8 +4,8 @@
 
 CC = gcc
 
-CFLAGS = -Wall -Wextra -Werror -pthread -Iinclude
-LDFLAGS = -lm -pthread
+CFLAGS   = -Wall -Wextra -Werror -pthread -Iinclude
+LDFLAGS  = -lm -pthread
 
 TARGET = bridge_sim
 
@@ -13,8 +13,8 @@ TARGET = bridge_sim
 # Directories
 # ==============================
 
-SRC_DIR = src
-INC_DIR = include
+SRC_DIR   = src
+INC_DIR   = include
 BUILD_DIR = build
 
 # ==============================
@@ -24,6 +24,8 @@ BUILD_DIR = build
 SRC = $(wildcard $(SRC_DIR)/*.c)
 OBJ = $(patsubst $(SRC_DIR)/%.c,$(BUILD_DIR)/%.o,$(SRC))
 
+CONFIG ?= bridge.config
+
 # ==============================
 # Default target
 # ==============================
@@ -31,35 +33,35 @@ OBJ = $(patsubst $(SRC_DIR)/%.c,$(BUILD_DIR)/%.o,$(SRC))
 all: $(TARGET)
 
 # ==============================
-# Link executable
+# Link
 # ==============================
 
 $(TARGET): $(OBJ)
-	$(CC) $(OBJ) -o $(TARGET) $(LDFLAGS)
+	$(CC) $^ -o $@ $(LDFLAGS)
 
 # ==============================
-# Compile objects
+# Compile
 # ==============================
 
 $(BUILD_DIR)/%.o: $(SRC_DIR)/%.c | $(BUILD_DIR)
 	$(CC) $(CFLAGS) -c $< -o $@
 
 # ==============================
-# Ensure build directory exists
+# Ensure build dir exists
 # ==============================
 
 $(BUILD_DIR):
 	mkdir -p $(BUILD_DIR)
 
 # ==============================
-# Utility targets
+# Utility
 # ==============================
+
+run: $(TARGET)
+	./$(TARGET) $(CONFIG)
 
 clean:
 	rm -rf $(BUILD_DIR) $(TARGET)
-
-run: $(TARGET)
-	./$(TARGET)
 
 re: clean all
 

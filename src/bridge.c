@@ -9,7 +9,6 @@
 /* =================== FIFO HELPERS ==================== */
 /* ===================================================== */
 
-/* Append node to the tail — strict arrival order, no reordering. */
 static void fifo_push(FifoQueue *q, FifoNode *node)
 {
     node->next = NULL;
@@ -21,7 +20,6 @@ static void fifo_push(FifoQueue *q, FifoNode *node)
     q->size++;
 }
 
-/* Remove the head node after it has been cleared to enter. */
 static void fifo_pop(FifoQueue *q)
 {
     if (!q->head) return;
@@ -32,45 +30,81 @@ static void fifo_pop(FifoQueue *q)
 }
 
 /* ===================================================== */
-/* =================== BRIDGE LOGIC ==================== */
+/* ================ ENTRY PREDICATE ==================== */
 /* ===================================================== */
 
 /*
- * Can the head of `side` enter the bridge right now?
+ * Decides whether the head of `side` may enter the bridge right now.
+ * This is the single place where Carnage, Semaphore (and later Officer)
+ * rules diverge. Must be called with bridge->lock held.
  *
- * Yes if ALL of:
- *   (a) The bridge is empty or already flowing in this direction.
- *   (b) The head of the opposite queue is NOT an ambulance, OR this
- *       vehicle is itself an ambulance (two ambulances resolve by
- *       whoever is already on the bridge / direction order).
+ * CARNAGE
+ *   - Bridge empty or same direction, AND
+ *   - Not a normal car facing an ambulance at the opposite head.
  *
- * Must be called with bridge->lock held.
+ * SEMAPHORE
+ *   Normal car on GREEN: same as Carnage.
+ *   Normal car on RED:   blocked entirely — must wait for green.
+ *   Ambulance on GREEN:  same as Carnage.
+ *   Ambulance on RED:    may enter only when the bridge is completely
+ *                        empty (no oncoming cars). The light does not
+ *                        flip; the ambulance simply crosses on red.
  */
 static int can_head_enter(const Bridge *b, Direction side)
 {
     const FifoNode *head = b->queue[side].head;
     if (!head) return 0;
 
-    Direction opp = (side == EAST) ? WEST : EAST;
+    Direction       opp      = (side == EAST) ? WEST : EAST;
     const FifoNode *opp_head = b->queue[opp].head;
 
-    int bridge_ok  = (b->cars_on_bridge == 0 ||
-                      b->current_direction == side);
+    /* ---- direction / oncoming traffic check (all modes) ---- */
+    int bridge_clear   = (b->cars_on_bridge == 0);
+    int same_direction = (b->current_direction == side);
+    int bridge_ok      = bridge_clear || same_direction;
 
+    /* ---- opposite-ambulance yield rule (all modes) ---- */
     int must_yield = (!head->is_ambulance &&
                       opp_head != NULL &&
                       opp_head->is_ambulance);
 
+    if (b->mode == MODE_SEMAPHORE) {
+        LightState my_light = b->light[side];
+
+        if (head->is_ambulance) {
+            /*
+             * Ambulance on red: cross only when the bridge is completely
+             * empty. The must_yield rule still applies — if the opposite
+             * head is also an ambulance and the bridge is empty, both
+             * can_head_enter calls return true and the one that wins the
+             * lock first enters (carnage-style among ambulances).
+             */
+            if (my_light == LIGHT_RED)
+                return bridge_clear && !must_yield;
+
+            /* Ambulance on green: normal carnage rules apply */
+            return bridge_ok && !must_yield;
+        }
+
+        /* Normal car on red: always blocked */
+        if (my_light == LIGHT_RED)
+            return 0;
+
+        /* Normal car on green: carnage rules */
+        return bridge_ok && !must_yield;
+    }
+
+    /* CARNAGE (and OFFICER placeholder): direction + yield rules */
     return bridge_ok && !must_yield;
 }
 
 /*
- * If the head of `side` can now enter, wake it.
+ * Signal the head of `side` if it can now enter.
  * Must be called with bridge->lock held.
  */
 static void try_wake_head(Bridge *b, Direction side)
 {
-    if (can_head_enter(b, side))
+    if (b->queue[side].head && can_head_enter(b, side))
         pthread_cond_signal(&b->queue[side].head->cv);
 }
 
@@ -83,7 +117,9 @@ Bridge *bridge_create(const Config *config)
     Bridge *b = malloc(sizeof(Bridge));
 
     b->length = config->bridge_length;
-    b->slots  = malloc(sizeof(pthread_mutex_t) * b->length);
+    b->mode   = config->mode;
+
+    b->slots = malloc(sizeof(pthread_mutex_t) * b->length);
     for (int i = 0; i < b->length; i++)
         pthread_mutex_init(&b->slots[i], NULL);
 
@@ -93,12 +129,13 @@ Bridge *bridge_create(const Config *config)
     b->current_direction = NONE;
 
     for (int s = 0; s < 2; s++) {
-        b->queue[s].head        = NULL;
-        b->queue[s].tail        = NULL;
-        b->queue[s].size        = 0;
-        b->waiting[s]           = 0;
+        b->queue[s].head         = NULL;
+        b->queue[s].tail         = NULL;
+        b->queue[s].size         = 0;
+        b->waiting[s]            = 0;
         b->ambulances_waiting[s] = 0;
-        b->passed_count[s]      = 0;
+        b->passed_count[s]       = 0;
+        b->light[s]              = LIGHT_OFF;
     }
 
     printf("[BRIDGE] Created with length: %d meters.\n", b->length);
@@ -124,7 +161,6 @@ void bridge_enter(Bridge *b, BridgeVehicleInfo *info)
     Direction  side = info->direction;
     FifoQueue *q    = &b->queue[side];
 
-    /* Build a wait node on this thread's stack. */
     FifoNode node;
     pthread_cond_init(&node.cv, NULL);
     node.is_ambulance = info->is_ambulance;
@@ -133,7 +169,6 @@ void bridge_enter(Bridge *b, BridgeVehicleInfo *info)
 
     pthread_mutex_lock(&b->lock);
 
-    /* --- Join the tail of the FIFO --- */
     b->waiting[side]++;
     if (info->is_ambulance) b->ambulances_waiting[side]++;
 
@@ -146,12 +181,8 @@ void bridge_enter(Bridge *b, BridgeVehicleInfo *info)
            q->size);
 
     /*
-     * If a new ambulance just joined the tail, the opposite head may need
-     * to stop entering. Signal it to re-check its wait condition — it will
-     * go back to sleep if it now has to yield.
-     *
-     * Note: we only need to do this when we are an ambulance, because only
-     * then does our presence change what the opposite head is allowed to do.
+     * If a new ambulance just joined our queue, the opposite head might
+     * now need to yield. Signal it so it re-evaluates its wait condition.
      */
     if (info->is_ambulance) {
         Direction opp = (side == EAST) ? WEST : EAST;
@@ -160,21 +191,12 @@ void bridge_enter(Bridge *b, BridgeVehicleInfo *info)
     }
 
     /*
-     * Wait until:
-     *   1. We are at the head of our FIFO (it is our turn), AND
-     *   2. The bridge conditions allow us to enter.
-     *
-     * We use a straight cond_wait loop; the node at the head will be
-     * explicitly signalled by either:
-     *   - The vehicle ahead of us (when it enters the bridge and pops itself), or
-     *   - bridge_leave (when the bridge empties and picks a new head to wake), or
-     *   - An arriving opposite ambulance (to make it re-check and possibly sleep).
+     * Wait until we are at the head AND can_head_enter says yes.
      */
-    while (q->head != &node || !can_head_enter(b, side)) {
+    while (q->head != &node || !can_head_enter(b, side))
         pthread_cond_wait(&node.cv, &b->lock);
-    }
 
-    /* --- We are cleared to enter --- */
+    /* --- Cleared to enter --- */
     fifo_pop(q);
 
     b->waiting[side]--;
@@ -190,25 +212,31 @@ void bridge_enter(Bridge *b, BridgeVehicleInfo *info)
            info->is_ambulance ? " [AMBULANCE]" : "",
            b->cars_on_bridge);
 
+    /* Semaphore mode: note when an ambulance crosses on red */
+    if (b->mode == MODE_SEMAPHORE &&
+        info->is_ambulance       &&
+        b->light[side] == LIGHT_RED)
+    {
+        printf("[SEMAPHORE] Ambulance %d crossing on RED (%s). "
+               "Light timer unchanged.\n",
+               info->id, side == EAST ? "EAST" : "WEST");
+    }
+
     /*
-     * Wake the new head of our own queue: it is now at the front and
-     * may be able to enter if conditions allow (carnage mode — multiple
-     * same-direction vehicles can pipeline onto the bridge).
+     * Wake the new head of our queue — it may also be able to enter
+     * (same-direction pipelining, carnage-style when green).
      */
     try_wake_head(b, side);
 
     /*
-     * Also wake the opposite head in case it was waiting only because
-     * we (now on the bridge) were blocking it, and it can now enter
-     * (this only applies if it is an ambulance and we are too, which
-     * can_head_enter handles correctly).
+     * Wake the opposite head in case it was blocked by us being an
+     * ambulance and can now re-evaluate (e.g. if it is also an ambulance).
      */
     Direction opp = (side == EAST) ? WEST : EAST;
     try_wake_head(b, opp);
 
     pthread_mutex_unlock(&b->lock);
 
-    /* Claim the first physical meter. */
     pthread_mutex_lock(&b->slots[0]);
     pthread_cond_destroy(&node.cv);
 }
@@ -239,13 +267,17 @@ void bridge_leave(Bridge *b, BridgeVehicleInfo *info)
         b->current_direction = NONE;
 
         /*
-         * Bridge is empty — decide who goes next and wake their head.
+         * Bridge empty — decide who to wake.
          *
-         * Priority order:
-         *   1. Ambulance waiting on the opposite side  (they have been blocked longest)
-         *   2. Ambulance waiting on the same side
-         *   3. Any vehicle on the opposite side        (fairness: alternate directions)
-         *   4. Any vehicle on the same side
+         * Priority order (same for all modes):
+         *   1. Ambulance at opposite head
+         *   2. Ambulance at same head
+         *   3. Any vehicle at opposite head  (fairness)
+         *   4. Any vehicle at same head
+         *
+         * try_wake_head respects the light state, so in SEMAPHORE mode
+         * a normal car on red will not be woken here — it will be woken
+         * when the semaphore thread flips the light to green.
          */
         int opp_amb  = b->queue[opp].head  && b->queue[opp].head->is_ambulance;
         int same_amb = b->queue[side].head && b->queue[side].head->is_ambulance;
@@ -266,6 +298,37 @@ void bridge_leave(Bridge *b, BridgeVehicleInfo *info)
             try_wake_head(b, side);
         }
     }
+
+    pthread_mutex_unlock(&b->lock);
+}
+
+/* ===================================================== */
+/* ================ SEMAPHORE INTERFACE ================ */
+/* ===================================================== */
+
+/*
+ * Called by the semaphore controller thread to flip the lights.
+ * green_side becomes GREEN; the other side becomes RED.
+ * Both queue heads are poked so they re-evaluate their conditions:
+ *   - The newly-green head may now be able to enter.
+ *   - The newly-red head must go back to sleep (if it is a normal car).
+ */
+void bridge_set_light(Bridge *b, Direction green_side)
+{
+    Direction red_side = (green_side == EAST) ? WEST : EAST;
+
+    pthread_mutex_lock(&b->lock);
+
+    b->light[green_side] = LIGHT_GREEN;
+    b->light[red_side]   = LIGHT_RED;
+
+    printf("[SEMAPHORE] Light GREEN for %s, RED for %s\n",
+           green_side == EAST ? "EAST" : "WEST",
+           red_side   == EAST ? "EAST" : "WEST");
+
+    /* Wake both heads — can_head_enter will sort out who actually enters */
+    try_wake_head(b, green_side);
+    try_wake_head(b, red_side);   /* red ambulance may still enter if bridge empty */
 
     pthread_mutex_unlock(&b->lock);
 }
