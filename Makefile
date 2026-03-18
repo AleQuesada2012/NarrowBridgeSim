@@ -84,7 +84,7 @@ CONFIG ?= bridge.config
 all: $(SIM_TARGET) $(GUI_TARGET)
 
 # ==============================
-# Link executables
+# Link
 # ==============================
 
 $(SIM_TARGET): $(SIM_OBJ)
@@ -108,14 +108,14 @@ $(BUILD_DIR)/gui.o: $(GUI_SRC) | $(BUILD_DIR)
 	$(CC) $(GUI_CFLAGS) -c $< -o $@
 
 # ==============================
-# Ensure build directory exists
+# Ensure build dir exists
 # ==============================
 
 $(BUILD_DIR):
 	mkdir -p $(BUILD_DIR)
 
 # ==============================
-# Utility targets
+# Utility
 # ==============================
 
 # Run simulation only (terminal output)
