@@ -86,8 +86,6 @@ static int can_head_enter(const Bridge *b, Direction side)
         LightState my_light = b->light[side];
 
         if (head->is_ambulance) {
-            if (my_light == LIGHT_RED)
-                return bridge_clear && !must_yield;
             return bridge_ok && !must_yield;
         }
 
