@@ -49,6 +49,14 @@ static void fifo_pop(FifoQueue *q)
  *   Ambulance on RED:    may enter only when the bridge is completely
  *                        empty (no oncoming cars). The light does not
  *                        flip; the ambulance simply crosses on red.
+ * 
+ * OFFICER
+ *  Normal car on current direction:    same as Carnage until enough vehicules pass the bridge.
+ *  Normal car on opposite direction:   blocked entirely — must wait for the officer.
+ *  Ambulance on current direction:     doesn't count in the "Officer" count, so same as Carnage.
+ *  Ambulance on opposite direction:    will enter when is the first in the queue,
+ *                                      otherwise should wait for its turn.
+ * 
  */
 static int can_head_enter(const Bridge *b, Direction side)
 {
@@ -96,6 +104,8 @@ static int can_head_enter(const Bridge *b, Direction side)
         /* Normal car on green: carnage rules */
         return bridge_ok && !must_yield;
     }
+
+    /*TODO: Add the conditions for a vehicule in Officer mode*/
 
     /* CARNAGE (and OFFICER placeholder): direction + yield rules */
     return bridge_ok && !must_yield;
@@ -229,6 +239,8 @@ void bridge_enter(Bridge *b, BridgeVehicleInfo *info)
                info->id, side == EAST ? "EAST" : "WEST");
     }
 
+    /*TODO: add the case when an ambulance arrives as the head of the queue but is in the opp direction*/
+
     /*
      * Wake the new head of our queue — it may also be able to enter
      * (same-direction pipelining, carnage-style when green).
@@ -347,6 +359,8 @@ void bridge_set_light(Bridge *b, Direction green_side)
 
     pthread_mutex_unlock(&b->lock);
 }
+
+/*TODO: Officer interface*/
 
 /* ===================================================== */
 /* ================ UTILITY FUNCTIONS ================== */
