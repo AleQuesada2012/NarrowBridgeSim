@@ -6,80 +6,133 @@
 #include "bridge.h"
 #include "config.h"
 
-/*
- * The semaphore controller thread.
- *
- * Timing model
- * ------------
- * The lights alternate strictly: EAST green for east_green_time seconds,
- * then WEST green for west_green_time seconds, then repeat.
- *
- * The timer is purely wall-clock based:
- *   - It does NOT pause while the bridge is being cleared.
- *   - It does NOT reset when an ambulance crosses on red.
- *   - When the green timer expires the light flips immediately, even if
- *     cars are mid-crossing. Those cars finish; the new red-side head
- *     re-evaluates and waits (bridge_set_light wakes it to re-check).
- *
- * Shutdown
- * --------
- * The main thread sets ctrl->running = 0 and the loop exits after the
- * current sleep segment completes (at most one second of extra latency,
- * since we sleep in 1-second ticks to remain responsive to shutdown).
- */
+/* ===================================================== */
+/* ================ SEMAPHORE THREAD =================== */
+/* ===================================================== */
 
 static void *semaphore_thread(void *arg)
 {
-    SemaphoreCtrl *ctrl   = (SemaphoreCtrl *)arg;
-    Bridge        *bridge = ctrl->bridge;
-    const Config  *config = ctrl->config;
+    Semaphore *sem = (Semaphore *)arg;
+    const char *name = (sem->side == EAST) ? "EAST" : "WEST";
 
-    int east_green = config->east.green_time;
-    int west_green = config->west.green_time;
+    printf("[SEMAPHORE-%s] Thread started. Green time: %ds\n",
+           name, sem->green_time);
 
-    printf("[SEMAPHORE] Controller started. "
-           "East green: %ds, West green: %ds\n",
-           east_green, west_green);
+    for (;;) {
+        /* ---- Step 1: wait until the peer signals us ---- */
+        pthread_mutex_lock(&sem->mutex);
+        while (!sem->go && *sem->running)
+            pthread_cond_wait(&sem->cv, &sem->mutex);
 
-    /* Start with EAST green */
-    bridge_set_light(bridge, EAST);
+        sem->go = 0;   /* consume the token */
+        pthread_mutex_unlock(&sem->mutex);
 
-    while (ctrl->running) {
-        /* --- EAST green phase --- */
-        for (int t = 0; t < east_green && ctrl->running; t++)
+        /* Exit if shutdown was requested while we were sleeping */
+        if (!*sem->running)
+            break;
+
+        /* ---- Step 2: become green ---- */
+        bridge_set_light(sem->bridge, sem->side);
+
+        printf("[SEMAPHORE-%s] Now GREEN for %ds\n", name, sem->green_time);
+
+        /* ---- Step 3: hold green for green_time seconds ---- */
+        for (int t = 0; t < sem->green_time && *sem->running; t++)
             sleep(1);
 
-        if (!ctrl->running) break;
+        if (!*sem->running)
+            break;
 
-        /* Switch to WEST green */
-        bridge_set_light(bridge, WEST);
+        printf("[SEMAPHORE-%s] Green phase over. Waking %s.\n", name,
+        (sem->side == EAST) ? "WEST" : "EAST");
 
-        /* --- WEST green phase --- */
-        for (int t = 0; t < west_green && ctrl->running; t++)
-            sleep(1);
+        /* ---- Step 4: signal peer — it is now its turn ---- */
+        pthread_mutex_lock(&sem->peer->mutex);
+        sem->peer->go = 1;
+        pthread_cond_signal(&sem->peer->cv);
+        pthread_mutex_unlock(&sem->peer->mutex);
 
-        if (!ctrl->running) break;
-
-        /* Switch back to EAST green */
-        bridge_set_light(bridge, EAST);
+        /* ---- Step 5: go back to sleep (loop to Step 1) ---- */
     }
 
-    printf("[SEMAPHORE] Controller stopped.\n");
+    printf("[SEMAPHORE-%s] Thread stopped.\n", name);
     return NULL;
+}
+
+/* ===================================================== */
+/* ================ LIFECYCLE ========================== */
+/* ===================================================== */
+
+static void semaphore_init(Semaphore    *sem,
+                           Direction     side,
+                           int           green_time,
+                           Bridge       *bridge,
+                           volatile int *running)
+{
+    sem->side       = side;
+    sem->green_time = green_time;
+    sem->bridge     = bridge;
+    sem->running    = running;
+    sem->go         = 0;
+    sem->peer       = NULL;   /* wired up by semaphore_ctrl_start */
+
+    pthread_mutex_init(&sem->mutex, NULL);
+    pthread_cond_init(&sem->cv,     NULL);
 }
 
 void semaphore_ctrl_start(SemaphoreCtrl *ctrl,
                           Bridge        *bridge,
                           const Config  *config)
 {
-    ctrl->bridge  = bridge;
-    ctrl->config  = config;
     ctrl->running = 1;
-    pthread_create(&ctrl->thread, NULL, semaphore_thread, ctrl);
+
+    semaphore_init(&ctrl->east, EAST,
+                   config->east.green_time, bridge, &ctrl->running);
+    semaphore_init(&ctrl->west, WEST,
+                   config->west.green_time, bridge, &ctrl->running);
+
+    /* Wire the peers so each thread can signal the other */
+    ctrl->east.peer = &ctrl->west;
+    ctrl->west.peer = &ctrl->east;
+
+    /*
+     * Bootstrap: give EAST the first token so it becomes green
+     * immediately when its thread starts, without waiting for a signal.
+     */
+    ctrl->east.go = 1;
+
+    printf("[SEMAPHORE] Starting two independent semaphore threads.\n"
+           "[SEMAPHORE] East green: %ds  West green: %ds\n",
+           config->east.green_time, config->west.green_time);
+
+    pthread_create(&ctrl->east.thread, NULL, semaphore_thread, &ctrl->east);
+    pthread_create(&ctrl->west.thread, NULL, semaphore_thread, &ctrl->west);
 }
 
 void semaphore_ctrl_stop(SemaphoreCtrl *ctrl)
 {
+    /* Signal shutdown to both threads */
     ctrl->running = 0;
-    pthread_join(ctrl->thread, NULL);
+
+    /*
+     * Broadcast on both cvs so neither thread sleeps forever waiting
+     * for a token that will never come.
+     */
+    pthread_mutex_lock(&ctrl->east.mutex);
+    pthread_cond_broadcast(&ctrl->east.cv);
+    pthread_mutex_unlock(&ctrl->east.mutex);
+
+    pthread_mutex_lock(&ctrl->west.mutex);
+    pthread_cond_broadcast(&ctrl->west.cv);
+    pthread_mutex_unlock(&ctrl->west.mutex);
+
+    pthread_join(ctrl->east.thread, NULL);
+    pthread_join(ctrl->west.thread, NULL);
+
+    pthread_cond_destroy(&ctrl->east.cv);
+    pthread_mutex_destroy(&ctrl->east.mutex);
+    pthread_cond_destroy(&ctrl->west.cv);
+    pthread_mutex_destroy(&ctrl->west.mutex);
+
+    printf("[SEMAPHORE] Both threads joined.\n");
 }
