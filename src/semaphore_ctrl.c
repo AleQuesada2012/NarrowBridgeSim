@@ -1,4 +1,6 @@
 #include <stdio.h>
+#include <stdlib.h>
+#include <time.h>
 #include <unistd.h>
 #include <pthread.h>
 
@@ -43,8 +45,9 @@ static void *semaphore_thread(void *arg)
         if (!*sem->running)
             break;
 
-        printf("[SEMAPHORE-%s] Green phase over. Waking %s.\n", name,
-        (sem->side == EAST) ? "WEST" : "EAST");
+        printf("[SEMAPHORE-%s] Green phase over. Waking %s.\n",
+               name,
+               (sem->side == EAST) ? "WEST" : "EAST");
 
         /* ---- Step 4: signal peer — it is now its turn ---- */
         pthread_mutex_lock(&sem->peer->mutex);
@@ -91,19 +94,23 @@ void semaphore_ctrl_start(SemaphoreCtrl *ctrl,
     semaphore_init(&ctrl->west, WEST,
                    config->west.green_time, bridge, &ctrl->running);
 
-    /* Wire the peers so each thread can signal the other */
+    // Wire the peers so each thread can signal the other
     ctrl->east.peer = &ctrl->west;
     ctrl->west.peer = &ctrl->east;
 
     /*
-     * Bootstrap: give EAST the first token so it becomes green
-     * immediately when its thread starts, without waiting for a signal.
+     * Bootstrap: flip a coin to decide which side goes green first.
+     * The winner receives the "go" token; the other starts asleep.
      */
-    ctrl->east.go = 1;
+    srand((unsigned int)time(NULL));
+    Semaphore *first = (rand() % 2 == 0) ? &ctrl->east : &ctrl->west;
+    first->go = 1;
 
+    const char *first_name = (first->side == EAST) ? "EAST" : "WEST";
     printf("[SEMAPHORE] Starting two independent semaphore threads.\n"
-           "[SEMAPHORE] East green: %ds  West green: %ds\n",
-           config->east.green_time, config->west.green_time);
+           "[SEMAPHORE] East green: %ds  West green: %ds\n"
+           "[SEMAPHORE] Coin toss: %s goes first.\n",
+           config->east.green_time, config->west.green_time, first_name);
 
     pthread_create(&ctrl->east.thread, NULL, semaphore_thread, &ctrl->east);
     pthread_create(&ctrl->west.thread, NULL, semaphore_thread, &ctrl->west);

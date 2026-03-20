@@ -524,7 +524,7 @@ static void draw_header(SDL_Renderer *ren, int done)
     draw_text_bold(ren, WIN_W/2 - text_width(title)/2, 16, title, C_TEXT);
 }
 
-/* ---- Carnage mode: simple flow-direction indicator ---- */
+// Carnage mode: simple flow-direction indicator
 static void draw_carnage_indicator(SDL_Renderer *ren)
 {
     // int east_on = (bridge_dir == DIR_EAST);
@@ -599,11 +599,11 @@ static void draw_semaphore_indicator(SDL_Renderer *ren)
 
     /* EAST light — right side */
     draw_traffic_light(ren, WIN_W/2 + 100, cy,
-                       light[0], "->E", C_EAST_LABEL);
+                       light[0], "E->", C_EAST_LABEL);
 
     /* WEST light — left side */
     draw_traffic_light(ren, WIN_W/2 - 100, cy,
-                       light[1], "W->", C_WEST_LABEL);
+                       light[1], "<-W", C_WEST_LABEL);
 
     /* Centre label: which side is currently flowing */
     const char *dstr =
