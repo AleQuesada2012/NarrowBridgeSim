@@ -1,5 +1,5 @@
 #ifndef OFFICER_CTRL_H
-#define SOFFICER_CTRL_H
+#define OFFICER_CTRL_H
 
 #include "bridge.h"
 #include "config.h"

@@ -67,6 +67,9 @@ static int can_head_enter(const Bridge *b, Direction side)
     Direction opp = (side == EAST) ? WEST : EAST;
     const FifoNode *opp_head = b->queue[opp].head;
 
+    // hard check for max capacity
+    if (b->cars_on_bridge >= b->length) return 0;
+
     /* ---- direction / oncoming traffic check (all modes) ---- */
     int bridge_clear = (b->cars_on_bridge == 0);
     int same_direction = (b->current_direction == side);
@@ -324,6 +327,14 @@ void bridge_leave(Bridge *b, BridgeVehicleInfo *info)
         {
             try_wake_head(b, side);
         }
+    } else {
+        /*
+         * Bridge is not empty but a slot just freed up.  Wake the same-
+         * direction head if capacity now allows it — this is the case
+         * where the bridge was full and the next car in line was blocked
+         * purely by the capacity check, not by a direction conflict.
+         */
+        try_wake_head(b, side);
     }
 
     pthread_mutex_unlock(&b->lock);
