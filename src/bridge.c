@@ -84,19 +84,7 @@ static int can_head_enter(const Bridge *b, Direction side)
     {
         LightState my_light = b->light[side];
 
-        if (head->is_ambulance)
-        {
-            /*
-             * Ambulance on red: cross only when the bridge is completely
-             * empty. The must_yield rule still applies — if the opposite
-             * head is also an ambulance and the bridge is empty, both
-             * can_head_enter calls return true and the one that wins the
-             * lock first enters (carnage-style among ambulances).
-             */
-            if (my_light == LIGHT_RED)
-                return bridge_clear && !must_yield;
-
-            /* Ambulance on green: normal carnage rules apply */
+        if (head->is_ambulance) {
             return bridge_ok && !must_yield;
         }
 
@@ -215,6 +203,8 @@ void bridge_enter(Bridge *b, BridgeVehicleInfo *info)
     while (q->head != &node || !can_head_enter(b, side))
         pthread_cond_wait(&node.cv, &b->lock);
 
+    pthread_mutex_lock(&b->slots[0]);
+    
     /* --- Cleared to enter --- */
     fifo_pop(q);
 
@@ -259,7 +249,7 @@ void bridge_enter(Bridge *b, BridgeVehicleInfo *info)
 
     pthread_mutex_unlock(&b->lock);
 
-    pthread_mutex_lock(&b->slots[0]);
+    // the b lock called here was moved upwards to solve a race condition with slot 0
     pthread_cond_destroy(&node.cv);
 }
 
