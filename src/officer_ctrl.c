@@ -41,27 +41,32 @@ static void *officer_thread(void *arg)
            "East k value: %ds, West k value: %ds\n",
            east_k_value, west_k_value);
 
-    /* Start with EAST green */
-    bridge_set_light(bridge, EAST);
-
+    /* Start with EAST side */
+    bridge_set_officer(bridge, EAST, east_k_value + 1);
+    // adding 1 to the k values allows to do a cleaner switch if 
+    // an ambulance arrives just when the k value is ruuning out
     while (ctrl->running) {
-        /* --- EAST green phase --- */
-        for (int t = 0; t < east_k_value && ctrl->running; t++)
-            sleep(1);
+        /* --- EAST phase --- */
+        while(bridge_get_current_k(bridge) > 0 && !bridge_get_ambulance_reset(bridge)){
+        }
 
         if (!ctrl->running) break;
 
-        /* Switch to WEST green */
-        bridge_set_light(bridge, WEST);
+        /* Switch to WEST side */
+        bridge_set_officer(bridge, WEST, west_k_value + 1);
+        printf("%d",bridge->ambulance_reset);
+        bridge->ambulance_reset = 0; // restoring the value for the next phase
 
-        /* --- WEST green phase --- */
-        for (int t = 0; t < west_k_value && ctrl->running; t++)
-            sleep(1);
+        /* --- WEST phase --- */
+        while(bridge_get_current_k(bridge) > 0 && !bridge_get_ambulance_reset(bridge)){
+        }
 
         if (!ctrl->running) break;
 
-        /* Switch back to EAST green */
-        bridge_set_light(bridge, EAST);
+        /* Switch back to EAST side */
+        bridge->ambulance_reset = 0; // restoring the value for the next phase
+        
+        bridge_set_officer(bridge, EAST, east_k_value + 1);
     }
 
     printf("[OFFICER] Controller stopped.\n");

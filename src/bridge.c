@@ -97,6 +97,21 @@ static int can_head_enter(const Bridge *b, Direction side)
     }
 
     /*TODO: Add the conditions for a vehicule in Officer mode*/
+    if(b->mode == MODE_OFFICER){
+
+        OfficerState my_side = b->officer_side[side];
+
+        if (head->is_ambulance) {
+            return bridge_ok && !must_yield;
+        }
+
+        /* Normal car on opp officer's side: always blocked */
+        if (my_side == OPP)
+            return 0;
+
+        /* Normal car on officer's side: until the  */
+        return bridge_ok && !must_yield && (b->current_k_value > 0);
+    }
 
     /* CARNAGE (and OFFICER placeholder): direction + yield rules */
     return bridge_ok && !must_yield;
@@ -142,6 +157,8 @@ Bridge *bridge_create(const Config *config)
         b->passed_count[s] = 0;
         b->light[s] = LIGHT_OFF;
     }
+
+    b->ambulance_reset = 0;
 
     printf("[BRIDGE] Created with length: %d meters.\n", b->length);
     return b;
@@ -215,6 +232,8 @@ void bridge_enter(Bridge *b, BridgeVehicleInfo *info)
     b->cars_on_bridge++;
     b->current_direction = side;
     b->passed_count[side]++;
+    
+    b->current_k_value--;
 
     printf("[BRIDGE] Vehicle %d entered headed %s%s. Cars on bridge: %d\n",
            info->id,
@@ -232,8 +251,16 @@ void bridge_enter(Bridge *b, BridgeVehicleInfo *info)
                info->id, side == EAST ? "EAST" : "WEST");
     }
 
-    /*TODO: add the case when an ambulance arrives as the head of the queue but is in the opp direction*/
-
+    /* Officer mode: note when an ambulance crosses on from the opposite side*/
+    if (b->mode == MODE_OFFICER &&
+        info->is_ambulance &&
+        b->officer_side[side] == OPP)
+    {
+        printf("[OFFICER] Ambulance %d passing on OPPOSITE DIRECTION (%s). "
+               "Changing sides.\n",
+               info->id, side == EAST ? "EAST" : "WEST");
+        b->ambulance_reset = 1;
+    }
     /*
      * Wake the new head of our queue — it may also be able to enter
      * (same-direction pipelining, carnage-style when green).
@@ -361,7 +388,32 @@ void bridge_set_light(Bridge *b, Direction green_side)
     pthread_mutex_unlock(&b->lock);
 }
 
+/* =================================================== */
+/* ================ OFFICER INTERFACE ================ */
+/* =================================================== */
+
 /*TODO: Officer interface*/
+void bridge_set_officer(Bridge *b, Direction new_side, int k){
+
+    Direction opp_side = (new_side == EAST) ? WEST : EAST;
+
+    pthread_mutex_lock(&b->lock);
+
+    b->current_k_value = k;
+    b->officer_side[new_side] = SAME;
+    b->officer_side[opp_side] = OPP;   
+
+    printf("[OFFICER] BRIDGE ABLED for %s, CLOSED for %s\n",
+           new_side == EAST ? "EAST" : "WEST",
+           opp_side == EAST ? "EAST" : "WEST");
+
+    /* Wake both heads — can_head_enter will sort out who actually enters */
+    try_wake_head(b, new_side);
+    try_wake_head(b, opp_side); /* opp ambulance may still enter if bridge empty */
+
+    pthread_mutex_unlock(&b->lock);
+}
+
 
 /* ===================================================== */
 /* ================ UTILITY FUNCTIONS ================== */
@@ -370,4 +422,13 @@ void bridge_set_light(Bridge *b, Direction green_side)
 int bridge_get_length(Bridge *bridge)
 {
     return bridge ? bridge->length : -1;
+}
+
+int bridge_get_current_k(Bridge *bridge){
+    return bridge->current_k_value;
+}
+
+int bridge_get_ambulance_reset(Bridge *bridge){
+    return bridge->ambulance_reset; // 0 if the flow is interrupted by an ambulance
+                                    // 1 else
 }

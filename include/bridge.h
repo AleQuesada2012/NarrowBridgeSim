@@ -20,6 +20,12 @@ typedef enum {
     LIGHT_OFF   = 2   /* CARNAGE and OFFICER modes */
 } LightState;
 
+typedef enum {
+    SAME                = 0,
+    OPP                 = 1,
+    OFFICERs_DAY_OFF    = 2   /* CARNAGE and SEMAPHORE modes */
+} OfficerState;
+
 /* ============================= */
 /* ========= FIFO QUEUE ======== */
 /* ============================= */
@@ -66,6 +72,12 @@ struct Bridge {
     int              waiting[2];
     int              ambulances_waiting[2];
     int              passed_count[2];
+
+    /* Counters for OFFICER MODE */
+    int              current_k_value;       
+    int              ambulance_reset;   // 1 if the flow is interrupted by an ambulance
+                                        // 0 else
+    OfficerState     officer_side[2];
 };
 
 /* ============================= */
@@ -98,5 +110,7 @@ int     bridge_get_length(Bridge *bridge);
  * Acquires bridge->lock internally.
  */
 void    bridge_set_light(Bridge *bridge, Direction green_side);
-
+void    bridge_set_officer(Bridge *bridge, Direction current_side, int k);
+int     bridge_get_current_k(Bridge *bridge);
+int     bridge_get_ambulance_reset(Bridge *bridge);
 #endif
