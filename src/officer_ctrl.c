@@ -62,63 +62,54 @@ static void *officer_side_thread(void *arg)
         if (!ctrl->running) break;
 
         /*
-         * ---- Phase 2: run our phase (may loop on ambulance resets) ----
+         * ---- Phase 2: run our phase ----
          *
-         * We loop here rather than returning to Phase 1 because an
-         * ambulance from the opposite side resets our K but does NOT
-         * change whose turn it is.
+         * Open our side with a fresh K quota and wait until one of:
+         *   (a) K reaches 0               → switch turn to the other side
+         *   (b) ambulance_reset fires      → ambulance from the blocked side
+         *                                   crossed; our turn ends immediately,
+         *                                   switch turn to the other side
+         *   (c) early-switch condition     → switch turn early
+         *   (d) shutdown requested         → exit
+         *
+         * pthread_cond_wait releases bridge->lock while sleeping,
+         * so vehicle threads run freely during this wait.
          */
-        do {
-            /* Open our side with a fresh K quota */
-            bridge_set_officer(bridge, my_side, my_k);
+        bridge_set_officer(bridge, my_side, my_k);
 
+        while (ctrl->running &&
+               bridge->current_k_value > 0 &&
+               !bridge->ambulance_reset)
+        {
             /*
-             * Wait until one of:
-             *   (a) K reaches 0               → switch turn
-             *   (b) ambulance_reset fires      → reset K, keep our turn
-             *   (c) early-switch condition     → switch turn early
-             *   (d) shutdown requested         → exit
-             *
-             * pthread_cond_wait releases bridge->lock while sleeping,
-             * so vehicle threads run freely during this wait.
+             * Early-switch check (spec §3.1 mode 3):
+             * If no vehicles are moving in our direction AND no
+             * vehicles are waiting on our side, but the other side
+             * has vehicles, give them the bridge immediately.
              */
-            while (ctrl->running &&
-                   bridge->current_k_value > 0 &&
-                   !bridge->ambulance_reset)
+            if (bridge->cars_on_bridge == 0 &&
+                bridge->queue[my_side].size == 0 &&
+                bridge->queue[opp].size > 0)
             {
-                /*
-                 * Early-switch check (spec §3.1 mode 3):
-                 * If no vehicles are moving in our direction AND no
-                 * vehicles are waiting on our side, but the other side
-                 * has vehicles, give them the bridge immediately.
-                 */
-                if (bridge->cars_on_bridge == 0 &&
-                    bridge->queue[my_side].size == 0 &&
-                    bridge->queue[opp].size > 0)
-                {
-                    printf("[OFFICER %s] No vehicles on my side — "
-                           "early switch to %s.\n",
-                           my_side == EAST ? "EAST" : "WEST",
-                           opp     == EAST ? "EAST" : "WEST");
-                    break;   /* exits inner while, then do-while check fails → switch turn */
-                }
-
-                pthread_cond_wait(&bridge->officer_cv, &bridge->lock);
+                printf("[OFFICER %s] No vehicles on my side — "
+                       "early switch to %s.\n",
+                       my_side == EAST ? "EAST" : "WEST",
+                       opp     == EAST ? "EAST" : "WEST");
+                break;
             }
 
-            if (!ctrl->running) break;
+            pthread_cond_wait(&bridge->officer_cv, &bridge->lock);
+        }
 
-            /* Handle ambulance-reset: log, then loop back to re-open our side */
-            if (bridge->ambulance_reset)
-            {
-                printf("[OFFICER %s] Ambulance crossed from blocked side. "
-                       "Resetting K to %d.\n",
-                       my_side == EAST ? "EAST" : "WEST", my_k);
-                /* bridge_set_officer (called at the top of the loop) will
-                   clear ambulance_reset and apply the new k */
-            }
+        if (!ctrl->running) break;
 
-        } while (ctrl->running && bridge->ambulance_reset);
+        if (bridge->ambulance_reset)
+        {
+            printf("[OFFICER %s] Ambulance crossed from blocked side — "
+                   "turn passes to %s.\n",
+                   my_side == EAST ? "EAST" : "WEST",
+                   opp     == EAST ? "EAST" : "WEST");
+        }
 
         if (!ctrl->running) break;
 

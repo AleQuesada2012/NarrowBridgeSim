@@ -105,7 +105,7 @@ static int can_head_enter(const Bridge *b, Direction side)
              * empty (bridge_ok is false if cars from the other direction
              * are still crossing).  Ambulance on SAME side: Carnage rules.
              */
-            return bridge_ok && !must_yield;
+            return bridge_ok;
 
         /* Normal car on the blocked side: always wait */
         if (my_side == OPP || my_side == OFFICERs_DAY_OFF)
@@ -275,13 +275,17 @@ void bridge_enter(Bridge *b, BridgeVehicleInfo *info)
                info->id, side == EAST ? "EAST" : "WEST");
     }
 
-    /* OFFICER mode: ambulance from the blocked side interrupts the flow */
+    /*
+     * OFFICER mode: an ambulance from the blocked side crosses.
+     * Set ambulance_reset so the active officer thread wakes up,
+     * ends its phase early, and passes the turn to the other side.
+     */
     if (b->mode == MODE_OFFICER &&
         info->is_ambulance &&
         b->officer_side[side] == OPP)
     {
         printf("[OFFICER] Ambulance %d crossing from BLOCKED side (%s). "
-               "Resetting active side's K.\n",
+               "Ending active side's turn.\n",
                info->id, side == EAST ? "EAST" : "WEST");
         b->ambulance_reset = 1;
         pthread_cond_signal(&b->officer_cv);
