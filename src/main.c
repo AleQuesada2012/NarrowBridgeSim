@@ -4,6 +4,7 @@
 #include "bridge.h"
 #include "traffic_generator.h"
 #include "semaphore_ctrl.h"
+#include "officer_ctrl.h"
 
 int main(int argc, char *argv[]) {
 
@@ -64,10 +65,19 @@ int main(int argc, char *argv[]) {
     if (config.mode == MODE_SEMAPHORE)
         semaphore_ctrl_start(&sem_ctrl, bridge, &config);
 
+    /* Start the officer controller only in OFFICER mode */
+    OfficerCtrl officer_ctrl;
+    if (config.mode == MODE_OFFICER)
+        officer_ctrl_start(&officer_ctrl, bridge, &config);
+
     traffic_generator_start(&config, bridge);
 
     if (config.mode == MODE_SEMAPHORE)
         semaphore_ctrl_stop(&sem_ctrl);
+
+    /* Stop the officer controller after all traffic has finished */
+    if (config.mode == MODE_OFFICER)
+        officer_ctrl_stop(&officer_ctrl);
 
     bridge_destroy(bridge);
     return EXIT_SUCCESS;
