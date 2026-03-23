@@ -73,18 +73,35 @@ struct Bridge {
     int              ambulances_waiting[2];
     int              passed_count[2];
 
-    /* Counters for OFFICER MODE */
-    int              current_k_value;       
-    int              ambulance_reset;   // 1 if the flow is interrupted by an ambulance
-                                        // 0 else
+    /* ---- OFFICER MODE ---- */
+
+    int              current_k_value;
+
+    /*
+     * Counts non-ambulance SAME-side cars that have entered this phase
+     * but have not yet exited.  The officer waits until BOTH
+     * current_k_value == 0 (quota exhausted, no new entries) AND
+     * k_on_bridge == 0 (every admitted car has fully crossed) before
+     * handing the turn to the other side.
+     */
+    int              k_on_bridge;
+
+    /*
+     * Set to 1 when an ambulance from the BLOCKED side crosses.
+     * The active officer thread ends its phase and passes the turn.
+     * Cleared by bridge_set_officer().
+     */
+    int              ambulance_reset;
+
     OfficerState     officer_side[2];
+
     /*
      * Whose turn it is (EAST or WEST).
      * Written only by officer threads; read by both officer threads.
      * Protected by bridge->lock.
      */
     Direction        officer_turn;
- 
+
     /*
      * officer_cv   — signalled when k changes or ambulance_reset fires.
      *                The active officer thread waits here.
@@ -126,9 +143,11 @@ int     bridge_get_length(Bridge *bridge);
  * Acquires bridge->lock internally.
  */
 void    bridge_set_light(Bridge *bridge, Direction green_side);
+
+/*
+ * Called by officer threads (with bridge->lock already held) to
+ * activate a new side.  Does NOT acquire or release the lock.
+ */
 void    bridge_set_officer(Bridge *bridge, Direction current_side, int k);
-int     bridge_get_current_k(Bridge *bridge);
-int     bridge_get_ambulance_reset(Bridge *bridge);
-void    decrement_k_and_notify(Bridge *bridge);
 
 #endif

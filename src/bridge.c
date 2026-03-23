@@ -100,12 +100,20 @@ static int can_head_enter(const Bridge *b, Direction side)
         OfficerState my_side = b->officer_side[side];
 
         if (head->is_ambulance)
+        {
             /*
-             * Ambulance on OPP side: enter only when bridge is completely
-             * empty (bridge_ok is false if cars from the other direction
-             * are still crossing).  Ambulance on SAME side: Carnage rules.
+             * Ambulance on the ACTIVE side: Carnage rules — may join
+             * same-direction traffic already on the bridge.
+             *
+             * Ambulance on the BLOCKED side: must wait until the bridge
+             * is completely empty.  bridge_ok would let it slip in behind
+             * same-direction traffic still crossing, which is wrong — the
+             * bridge must be fully clear before the side switch.
              */
-            return bridge_ok;
+            if (my_side == OPP)
+                return bridge_clear && !must_yield;
+            return bridge_ok && !must_yield;
+        }
 
         /* Normal car on the blocked side: always wait */
         if (my_side == OPP || my_side == OFFICERs_DAY_OFF)
@@ -164,6 +172,7 @@ Bridge *bridge_create(const Config *config)
 
     /* Officer-mode fields */
     b->current_k_value = 0;
+    b->k_on_bridge     = 0;
     b->ambulance_reset = 0;
     b->officer_turn    = EAST;   /* EAST officer thread goes first */
 
@@ -292,15 +301,38 @@ void bridge_enter(Bridge *b, BridgeVehicleInfo *info)
     }
 
     /*
-     * Only non-ambulance vehicles on the ACTIVE side consume a K slot.
-     * Ambulances (same or opposite side) are priority passes and do
-     * not count toward the K limit.
+     * K slot accounting for OFFICER mode, ACTIVE side:
+     *
+     *  - Normal car:               always consumes a slot.
+     *  - Ambulance, k > 0:         consumes a slot like a normal car
+     *                              (rule 2 — it arrived while quota was live).
+     *  - Ambulance, k == 0:        free privilege pass — does not consume
+     *                              a slot and does not block the side switch
+     *                              (rule 1 — quota already exhausted).
+     *
+     * In all consuming cases we decrement current_k_value (so
+     * can_head_enter blocks further normal-car entries once exhausted)
+     * and increment k_on_bridge (so the officer waits for this car to
+     * fully cross before switching sides).
+     * The officer is NOT woken here — bridge_leave does that once
+     * k_on_bridge also reaches 0.
      */
     if (b->mode == MODE_OFFICER &&
-        !info->is_ambulance &&
-        b->officer_side[side] == SAME)
+        b->officer_side[side] == SAME &&
+        (!info->is_ambulance || b->current_k_value > 0))
     {
-        decrement_k_and_notify(b);
+        b->current_k_value--;
+        b->k_on_bridge++;
+        printf("[OFFICER] K slot used%s. Remaining entries: %d, still crossing: %d\n",
+               info->is_ambulance ? " [AMBULANCE]" : "",
+               b->current_k_value, b->k_on_bridge);
+    }
+    else if (b->mode == MODE_OFFICER &&
+             info->is_ambulance &&
+             b->officer_side[side] == SAME)
+    {
+        printf("[OFFICER] Ambulance %d privilege pass (k already 0) — "
+               "does not consume a slot.\n", info->id);
     }
 
     /* Wake the new head of our queue (same-direction pipelining) */
@@ -396,6 +428,30 @@ void bridge_leave(Bridge *b, BridgeVehicleInfo *info)
         try_wake_head(b, side);
     }
 
+    /*
+     * OFFICER mode: if this vehicle consumed a K slot on entry
+     * (normal car, or ambulance that entered while k > 0), decrement
+     * k_on_bridge.  Ambulances that got a free privilege pass (k was
+     * already 0 on entry) never incremented k_on_bridge, so they are
+     * correctly skipped here by the k_on_bridge > 0 guard.
+     *
+     * When both k_on_bridge and current_k_value reach 0 the entire
+     * quota has fully crossed — wake the officer to switch sides.
+     */
+    if (b->mode == MODE_OFFICER && b->k_on_bridge > 0)
+    {
+        b->k_on_bridge--;
+        printf("[OFFICER] %s fully crossed. Still crossing: %d, entries left: %d\n",
+               info->is_ambulance ? "Ambulance" : "Car",
+               b->k_on_bridge, b->current_k_value);
+
+        if (b->k_on_bridge == 0 && b->current_k_value == 0)
+        {
+            printf("[OFFICER] All K cars have crossed — waking officer thread.\n");
+            pthread_cond_signal(&b->officer_cv);
+        }
+    }
+
     pthread_mutex_unlock(&b->lock);
 }
 
@@ -442,6 +498,7 @@ void bridge_set_officer(Bridge *b, Direction new_side, int k)
     Direction opp_side = (new_side == EAST) ? WEST : EAST;
 
     b->current_k_value          = k;
+    b->k_on_bridge              = 0;
     b->officer_side[new_side]   = SAME;
     b->officer_side[opp_side]   = OPP;
     b->ambulance_reset          = 0;
@@ -462,23 +519,4 @@ void bridge_set_officer(Bridge *b, Direction new_side, int k)
 int bridge_get_length(Bridge *bridge)
 {
     return bridge ? bridge->length : -1;
-}
-
-/*
- * Decrements the K counter and notifies the officer thread when the
- * quota hits zero.  Called only for non-ambulance vehicles on the SAME
- * officer side (enforced at the call site in bridge_enter).
- */
-void decrement_k_and_notify(Bridge *bridge)
-{
-    if (bridge->current_k_value <= 0) return;
-
-    bridge->current_k_value--;
-    printf("[OFFICER] K slot used. Remaining: %d\n", bridge->current_k_value);
-
-    if (bridge->current_k_value == 0)
-    {
-        printf("[OFFICER] K exhausted — waking officer thread.\n");
-        pthread_cond_signal(&bridge->officer_cv);
-    }
 }

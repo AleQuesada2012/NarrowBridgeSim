@@ -78,13 +78,13 @@ static void *officer_side_thread(void *arg)
         bridge_set_officer(bridge, my_side, my_k);
 
         while (ctrl->running &&
-               bridge->current_k_value > 0 &&
+               (bridge->current_k_value > 0 || bridge->k_on_bridge > 0) &&
                !bridge->ambulance_reset)
         {
             /*
-             * Early-switch check (spec §3.1 mode 3):
-             * If no vehicles are moving in our direction AND no
-             * vehicles are waiting on our side, but the other side
+             * Early-switch check:
+             * If the quota is not yet exhausted but there are no vehicles
+             * on our side (on the bridge or waiting) and the other side
              * has vehicles, give them the bridge immediately.
              */
             if (bridge->cars_on_bridge == 0 &&
