@@ -30,6 +30,39 @@ static void fifo_pop(FifoQueue *q)
 }
 
 /* ===================================================== */
+/* ============= STRUCTURED GUI LOG HELPERS ============ */
+/* ===================================================== */
+
+/*
+ * Emit structured lines consumed by the GUI parser.
+ * All must be called with bridge->lock held.
+ */
+static void emit_queue(const Bridge *b, Direction side)
+{
+    /*
+     * Format: [QUEUE EAST|WEST id0:amb0 id1:amb1 ...]
+     *
+     * Each token is  <vehicle_id>:<is_ambulance>  in head-to-tail FIFO
+     * order, so the GUI renders icons in exact arrival order.
+     * An empty queue emits [QUEUE EAST] with no tokens.
+     */
+    printf("[QUEUE %s", side == EAST ? "EAST" : "WEST");
+    for (const FifoNode *n = b->queue[side].head; n; n = n->next)
+        printf(" %d:%d", n->id, n->is_ambulance);
+    printf("]\n");
+    fflush(stdout);
+}
+
+static void emit_direction(const Bridge *b)
+{
+    const char *d =
+        b->current_direction == EAST ? "EAST" :
+        b->current_direction == WEST ? "WEST" : "NONE";
+    printf("[DIRECTION %s]\n", d);
+    fflush(stdout);
+}
+
+/* ===================================================== */
 /* ================ ENTRY PREDICATE ==================== */
 /* ===================================================== */
 
@@ -58,10 +91,9 @@ static void fifo_pop(FifoQueue *q)
 static int can_head_enter(const Bridge *b, Direction side)
 {
     const FifoNode *head = b->queue[side].head;
-    if (!head)
-        return 0;
+    if (!head) return 0;
 
-    Direction opp = (side == EAST) ? WEST : EAST;
+    Direction       opp      = (side == EAST) ? WEST : EAST;
     const FifoNode *opp_head = b->queue[opp].head;
 
     /* Hard capacity check (all modes) */
@@ -77,16 +109,12 @@ static int can_head_enter(const Bridge *b, Direction side)
                       opp_head != NULL &&
                       opp_head->is_ambulance);
 
-    /* ---- SEMAPHORE ---- */
-    if (b->mode == MODE_SEMAPHORE)
-    {
+    if (b->mode == MODE_SEMAPHORE) {
         LightState my_light = b->light[side];
 
         if (head->is_ambulance)
-            /* Ambulance on RED: enter only when bridge is clear */
             return bridge_ok && !must_yield;
 
-        /* Normal car on red: always blocked */
         if (my_light == LIGHT_RED)
             return 0;
 
@@ -95,8 +123,7 @@ static int can_head_enter(const Bridge *b, Direction side)
     }
 
     /* ---- OFFICER ---- */
-    if (b->mode == MODE_OFFICER)
-    {
+    if (b->mode == MODE_OFFICER) {
         OfficerState my_side = b->officer_side[side];
 
         if (head->is_ambulance)
@@ -122,7 +149,6 @@ static int can_head_enter(const Bridge *b, Direction side)
         /* Normal car on the active side: Carnage rules while k > 0 */
         return bridge_ok && !must_yield && (b->current_k_value > 0);
     }
-
     /* ---- CARNAGE ---- */
     return bridge_ok && !must_yield;
 }
@@ -131,8 +157,7 @@ static int can_head_enter(const Bridge *b, Direction side)
  * Signal the head of `side` if it can now enter.
  * Must be called with bridge->lock held.
  */
-static void try_wake_head(Bridge *b, Direction side)
-{
+static void try_wake_head(Bridge *b, Direction side) {
     if (b->queue[side].head && can_head_enter(b, side))
         pthread_cond_signal(&b->queue[side].head->cv);
 }
@@ -180,6 +205,7 @@ Bridge *bridge_create(const Config *config)
     pthread_cond_init(&b->officer_done_cv, NULL);
 
     printf("[BRIDGE] Created with length: %d meters.\n", b->length);
+    fflush(stdout);
     return b;
 }
 
@@ -194,6 +220,7 @@ void bridge_destroy(Bridge *b)
     pthread_mutex_destroy(&b->lock);
 
     printf("=== Bridge destroyed. ===\n");
+    fflush(stdout);
     free(b);
 }
 
@@ -203,8 +230,8 @@ void bridge_destroy(Bridge *b)
 
 void bridge_enter(Bridge *b, BridgeVehicleInfo *info)
 {
-    Direction side = info->direction;
-    FifoQueue *q   = &b->queue[side];
+    Direction  side = info->direction;
+    FifoQueue *q    = &b->queue[side];
 
     /* Stack-allocate the wait node for this vehicle */
     FifoNode node;
@@ -216,16 +243,19 @@ void bridge_enter(Bridge *b, BridgeVehicleInfo *info)
     pthread_mutex_lock(&b->lock);
 
     b->waiting[side]++;
-    if (info->is_ambulance)
-        b->ambulances_waiting[side]++;
+    if (info->is_ambulance) b->ambulances_waiting[side]++;
 
     fifo_push(q, &node);
 
-    printf("[VEHICLE %d] Arrived at bridge headed %s%s. Queue: %d waiting\n",
+    printf("[VEHICLE %d] Arrived at bridge from %s%s. Queue: %d waiting\n",
            info->id,
            side == EAST ? "EAST" : "WEST",
            info->is_ambulance ? " [AMBULANCE]" : "",
            q->size);
+
+    fflush(stdout);
+     /* Emit updated queue state for the GUI */
+    emit_queue(b, side);
 
     /*
      * If a new ambulance just joined our queue, the opposite head might
@@ -261,28 +291,32 @@ void bridge_enter(Bridge *b, BridgeVehicleInfo *info)
     fifo_pop(q);
 
     b->waiting[side]--;
-    if (info->is_ambulance)
-        b->ambulances_waiting[side]--;
+    if (info->is_ambulance) b->ambulances_waiting[side]--;
 
     b->cars_on_bridge++;
     b->current_direction = side;
     b->passed_count[side]++;
 
-    printf("[BRIDGE] Vehicle %d entered headed %s%s. Cars on bridge: %d\n",
+    printf("[BRIDGE] Vehicle %d entered from %s%s. Cars on bridge: %d\n",
            info->id,
            side == EAST ? "EAST" : "WEST",
            info->is_ambulance ? " [AMBULANCE]" : "",
            b->cars_on_bridge);
+    fflush(stdout);
 
     /* SEMAPHORE mode: log ambulance crossing on red */
     if (b->mode == MODE_SEMAPHORE &&
-        info->is_ambulance &&
+        info->is_ambulance        &&
         b->light[side] == LIGHT_RED)
     {
         printf("[SEMAPHORE] Ambulance %d crossing on RED (%s). "
                "Light timer unchanged.\n",
                info->id, side == EAST ? "EAST" : "WEST");
+        fflush(stdout);
     }
+
+    emit_queue(b, side);
+    emit_direction(b);
 
     /*
      * OFFICER mode: an ambulance from the blocked side crosses.
@@ -368,9 +402,9 @@ void bridge_leave(Bridge *b, BridgeVehicleInfo *info)
            info->id,
            side == EAST ? "EAST" : "WEST",
            b->cars_on_bridge);
+    fflush(stdout);
 
-    if (b->cars_on_bridge == 0)
-    {
+    if (b->cars_on_bridge == 0) {
         b->current_direction = NONE;
 
         /*
@@ -388,26 +422,22 @@ void bridge_leave(Bridge *b, BridgeVehicleInfo *info)
         int opp_amb  = b->queue[opp].head  && b->queue[opp].head->is_ambulance;
         int same_amb = b->queue[side].head && b->queue[side].head->is_ambulance;
 
-        if (opp_amb)
-        {
+        if (opp_amb) {
             printf("[BRIDGE] PRIORITY: ambulance waiting %s\n",
                    opp == EAST ? "EAST" : "WEST");
+            fflush(stdout);
             try_wake_head(b, opp);
-        }
-        else if (same_amb)
-        {
+        } else if (same_amb) {
             printf("[BRIDGE] PRIORITY: ambulance waiting %s\n",
                    side == EAST ? "EAST" : "WEST");
+            fflush(stdout);
             try_wake_head(b, side);
-        }
-        else if (b->queue[opp].head)
-        {
+        } else if (b->queue[opp].head) {
             printf("[BRIDGE] Switching direction to %s\n",
                    opp == EAST ? "EAST" : "WEST");
+            fflush(stdout);
             try_wake_head(b, opp);
-        }
-        else if (b->queue[side].head)
-        {
+        } else if (b->queue[side].head) {
             try_wake_head(b, side);
         }
 
@@ -461,7 +491,10 @@ void bridge_leave(Bridge *b, BridgeVehicleInfo *info)
 
 /*
  * Called by the semaphore controller thread to flip the lights.
- * Acquires bridge->lock internally.
+ * green_side becomes GREEN; the other side becomes RED.
+ * Both queue heads are poked so they re-evaluate their conditions:
+ *   - The newly-green head may now be able to enter.
+ *   - The newly-red head must go back to sleep (if it is a normal car).
  */
 void bridge_set_light(Bridge *b, Direction green_side)
 {
@@ -470,15 +503,20 @@ void bridge_set_light(Bridge *b, Direction green_side)
     pthread_mutex_lock(&b->lock);
 
     b->light[green_side] = LIGHT_GREEN;
-    b->light[red_side]   = LIGHT_RED;
+    b->light[red_side]     = LIGHT_RED;
 
+    /* Human-readable log line */
     printf("[SEMAPHORE] Light GREEN for %s, RED for %s\n",
            green_side == EAST ? "EAST" : "WEST",
            red_side   == EAST ? "EAST" : "WEST");
 
-    /* Wake both heads — can_head_enter decides who actually enters */
+    /* Structured lines for the GUI — one per side */
+    printf("[LIGHT %s GREEN]\n", green_side == EAST ? "EAST" : "WEST");
+    printf("[LIGHT %s RED]\n",   red_side   == EAST ? "EAST" : "WEST");
+    fflush(stdout);
+
     try_wake_head(b, green_side);
-    try_wake_head(b, red_side);   /* red ambulance may cross if bridge empty */
+    try_wake_head(b, red_side);
 
     pthread_mutex_unlock(&b->lock);
 }

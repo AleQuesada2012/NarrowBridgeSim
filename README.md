@@ -22,6 +22,14 @@ The system can be configured to operate under one of three administrative modes:
 
 **Prerequisites:** A native Linux environment (no virtual machines) with GCC installed.
 
+Dependencies
+
+Ubuntu:
+`sudo apt install libsdl2-dev`
+
+MacOS X:
+`brew install sdl2`
+
 **Compilation:**
 To compile the project, simply run:
 ```bash
