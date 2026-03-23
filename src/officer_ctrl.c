@@ -1,90 +1,194 @@
 #include <stdio.h>
-#include <unistd.h>
+#include <stdlib.h>
 #include <pthread.h>
 
 #include "officer_ctrl.h"
 #include "bridge.h"
 #include "config.h"
 
+/* ===================================================== */
+/* ================ OFFICER THREAD ==================== */
+/* ===================================================== */
+
 /*
- * The semaphore controller thread.
- *
- * Timing model
- * ------------
- * The lights alternate strictly: EAST green for east_green_time seconds,
- * then WEST green for west_green_time seconds, then repeat.
- *
- * The timer is purely wall-clock based:
- *   - It does NOT pause while the bridge is being cleared.
- *   - It does NOT reset when an ambulance crosses on red.
- *   - When the green timer expires the light flips immediately, even if
- *     cars are mid-crossing. Those cars finish; the new red-side head
- *     re-evaluates and waits (bridge_set_light wakes it to re-check).
- *
- * Shutdown
- * --------
- * The main thread sets ctrl->running = 0 and the loop exits after the
- * current sleep segment completes (at most one second of extra latency,
- * since we sleep in 1-second ticks to remain responsive to shutdown).
+ * Arguments passed to each officer thread at creation.
+ * Heap-allocated and freed inside the thread itself.
  */
+typedef struct {
+    OfficerCtrl *ctrl;
+    Direction    side;
+    int          k_value;
+} OfficerThreadArgs;
 
-static void *officer_thread(void *arg)
+/*
+ * Shared thread routine for both the EAST and WEST officer threads.
+ *
+ * Locking model
+ * -------------
+ * The thread acquires bridge->lock at startup and holds it for its
+ * entire lifetime.  It is only ever *released* during the two
+ * pthread_cond_wait calls — which is exactly the purpose of condition
+ * variables.  Vehicle threads therefore run freely while the officer
+ * thread is waiting; they just cannot run simultaneously with it during
+ * the brief moments it is active (setting officer state, evaluating
+ * conditions, switching turns).
+ *
+ * This avoids any busy-waiting and guarantees that all state changes
+ * (officer_turn, current_k_value, ambulance_reset) are always observed
+ * consistently.
+ */
+static void *officer_side_thread(void *arg)
 {
-    OfficerCtrl *ctrl   = (OfficerCtrl *)arg;
-    Bridge        *bridge = ctrl->bridge;
-    const Config  *config = ctrl->config;
+    OfficerThreadArgs *args   = (OfficerThreadArgs *)arg;
+    OfficerCtrl       *ctrl   = args->ctrl;
+    Bridge            *bridge = ctrl->bridge;
+    Direction          my_side = args->side;
+    int                my_k    = args->k_value;
+    Direction          opp     = (my_side == EAST) ? WEST : EAST;
 
-    int east_k_value = config->east.k_value;
-    int west_k_value = config->west.k_value;
+    free(args);   /* args were heap-allocated in officer_ctrl_start */
 
-    printf("[OFFICER] Controller started. "
-           "East k value: %ds, West k value: %ds\n",
-           east_k_value, west_k_value);
+    printf("[OFFICER %s] Thread started (k=%d)\n",
+           my_side == EAST ? "EAST" : "WEST", my_k);
 
-    /* Start with EAST side */
-    bridge_set_officer(bridge, EAST, east_k_value + 1);
-    // adding 1 to the k values allows to do a cleaner switch if 
-    // an ambulance arrives just when the k value is ruuning out
-    while (ctrl->running) {
-        /* --- EAST phase --- */
-        while(bridge_get_current_k(bridge) > 0 && !bridge_get_ambulance_reset(bridge)){
-        }
+    pthread_mutex_lock(&bridge->lock);
 
-        if (!ctrl->running) break;
-
-        /* Switch to WEST side */
-        bridge_set_officer(bridge, WEST, west_k_value + 1);
-        printf("%d",bridge->ambulance_reset);
-        bridge->ambulance_reset = 0; // restoring the value for the next phase
-
-        /* --- WEST phase --- */
-        while(bridge_get_current_k(bridge) > 0 && !bridge_get_ambulance_reset(bridge)){
-        }
+    while (ctrl->running)
+    {
+        /* ---- Phase 1: wait until it is our turn ---- */
+        while (bridge->officer_turn != my_side && ctrl->running)
+            pthread_cond_wait(&bridge->officer_done_cv, &bridge->lock);
 
         if (!ctrl->running) break;
 
-        /* Switch back to EAST side */
-        bridge->ambulance_reset = 0; // restoring the value for the next phase
-        
-        bridge_set_officer(bridge, EAST, east_k_value + 1);
+        /*
+         * ---- Phase 2: run our phase (may loop on ambulance resets) ----
+         *
+         * We loop here rather than returning to Phase 1 because an
+         * ambulance from the opposite side resets our K but does NOT
+         * change whose turn it is.
+         */
+        do {
+            /* Open our side with a fresh K quota */
+            bridge_set_officer(bridge, my_side, my_k);
+
+            /*
+             * Wait until one of:
+             *   (a) K reaches 0               → switch turn
+             *   (b) ambulance_reset fires      → reset K, keep our turn
+             *   (c) early-switch condition     → switch turn early
+             *   (d) shutdown requested         → exit
+             *
+             * pthread_cond_wait releases bridge->lock while sleeping,
+             * so vehicle threads run freely during this wait.
+             */
+            while (ctrl->running &&
+                   bridge->current_k_value > 0 &&
+                   !bridge->ambulance_reset)
+            {
+                /*
+                 * Early-switch check (spec §3.1 mode 3):
+                 * If no vehicles are moving in our direction AND no
+                 * vehicles are waiting on our side, but the other side
+                 * has vehicles, give them the bridge immediately.
+                 */
+                if (bridge->cars_on_bridge == 0 &&
+                    bridge->queue[my_side].size == 0 &&
+                    bridge->queue[opp].size > 0)
+                {
+                    printf("[OFFICER %s] No vehicles on my side — "
+                           "early switch to %s.\n",
+                           my_side == EAST ? "EAST" : "WEST",
+                           opp     == EAST ? "EAST" : "WEST");
+                    break;   /* exits inner while, then do-while check fails → switch turn */
+                }
+
+                pthread_cond_wait(&bridge->officer_cv, &bridge->lock);
+            }
+
+            if (!ctrl->running) break;
+
+            /* Handle ambulance-reset: log, then loop back to re-open our side */
+            if (bridge->ambulance_reset)
+            {
+                printf("[OFFICER %s] Ambulance crossed from blocked side. "
+                       "Resetting K to %d.\n",
+                       my_side == EAST ? "EAST" : "WEST", my_k);
+                /* bridge_set_officer (called at the top of the loop) will
+                   clear ambulance_reset and apply the new k */
+            }
+
+        } while (ctrl->running && bridge->ambulance_reset);
+
+        if (!ctrl->running) break;
+
+        /* ---- Phase 3: pass the turn to the other side ---- */
+        printf("[OFFICER %s] Phase complete (k=%d, reset=%d). "
+               "Passing turn to %s.\n",
+               my_side == EAST ? "EAST" : "WEST",
+               bridge->current_k_value,
+               bridge->ambulance_reset,
+               opp == EAST ? "EAST" : "WEST");
+
+        bridge->officer_turn = opp;
+        pthread_cond_broadcast(&bridge->officer_done_cv);
     }
 
-    printf("[OFFICER] Controller stopped.\n");
+    pthread_mutex_unlock(&bridge->lock);
+
+    printf("[OFFICER %s] Thread stopped.\n",
+           my_side == EAST ? "EAST" : "WEST");
     return NULL;
 }
 
-void officer_ctrl_start(OfficerCtrl *ctrl,
-                          Bridge        *bridge,
-                          const Config  *config)
+/* ===================================================== */
+/* ================ PUBLIC INTERFACE ================== */
+/* ===================================================== */
+
+void officer_ctrl_start(OfficerCtrl  *ctrl,
+                        Bridge       *bridge,
+                        const Config *config)
 {
     ctrl->bridge  = bridge;
     ctrl->config  = config;
     ctrl->running = 1;
-    pthread_create(&ctrl->thread, NULL, officer_thread, ctrl);
+
+    /* bridge->officer_turn is initialised to EAST in bridge_create,
+       so the EAST thread goes first automatically. */
+
+    OfficerThreadArgs *east_args = malloc(sizeof(OfficerThreadArgs));
+    east_args->ctrl    = ctrl;
+    east_args->side    = EAST;
+    east_args->k_value = config->east.k_value;
+
+    OfficerThreadArgs *west_args = malloc(sizeof(OfficerThreadArgs));
+    west_args->ctrl    = ctrl;
+    west_args->side    = WEST;
+    west_args->k_value = config->west.k_value;
+
+    pthread_create(&ctrl->east_thread, NULL, officer_side_thread, east_args);
+    pthread_create(&ctrl->west_thread, NULL, officer_side_thread, west_args);
+
+    printf("[OFFICER] Controller started. East k=%d, West k=%d\n",
+           config->east.k_value, config->west.k_value);
 }
 
 void officer_ctrl_stop(OfficerCtrl *ctrl)
 {
     ctrl->running = 0;
-    pthread_join(ctrl->thread, NULL);
+
+    /*
+     * Broadcast on both CVs so that whichever thread is currently
+     * sleeping (on officer_done_cv or officer_cv) wakes up, sees
+     * running=0, and exits its loop.
+     */
+    pthread_mutex_lock(&ctrl->bridge->lock);
+    pthread_cond_broadcast(&ctrl->bridge->officer_done_cv);
+    pthread_cond_broadcast(&ctrl->bridge->officer_cv);
+    pthread_mutex_unlock(&ctrl->bridge->lock);
+
+    pthread_join(ctrl->east_thread, NULL);
+    pthread_join(ctrl->west_thread, NULL);
+
+    printf("[OFFICER] Controller stopped.\n");
 }

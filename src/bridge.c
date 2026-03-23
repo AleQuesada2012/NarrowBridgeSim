@@ -35,8 +35,7 @@ static void fifo_pop(FifoQueue *q)
 
 /*
  * Decides whether the head of `side` may enter the bridge right now.
- * This is the single place where Carnage, Semaphore (and later Officer)
- * rules diverge. Must be called with bridge->lock held.
+ * Must be called with bridge->lock held.
  *
  * CARNAGE
  *   - Bridge empty or same direction, AND
@@ -49,14 +48,12 @@ static void fifo_pop(FifoQueue *q)
  *   Ambulance on RED:    may enter only when the bridge is completely
  *                        empty (no oncoming cars). The light does not
  *                        flip; the ambulance simply crosses on red.
- * 
+ *
  * OFFICER
- *  Normal car on current direction:    same as Carnage until enough vehicules pass the bridge.
- *  Normal car on opposite direction:   blocked entirely — must wait for the officer.
- *  Ambulance on current direction:     doesn't count in the "Officer" count, so same as Carnage.
- *  Ambulance on opposite direction:    will enter when is the first in the queue,
- *                                      otherwise should wait for its turn.
- * 
+ *   Normal car on SAME side:   Carnage rules, while k > 0.
+ *   Normal car on OPP side:    blocked entirely.
+ *   Ambulance on SAME side:    Carnage rules (does not consume a K slot).
+ *   Ambulance on OPP side:     may enter only when bridge is completely empty.
  */
 static int can_head_enter(const Bridge *b, Direction side)
 {
@@ -67,53 +64,58 @@ static int can_head_enter(const Bridge *b, Direction side)
     Direction opp = (side == EAST) ? WEST : EAST;
     const FifoNode *opp_head = b->queue[opp].head;
 
-    // hard check for max capacity
+    /* Hard capacity check (all modes) */
     if (b->cars_on_bridge >= b->length) return 0;
 
-    /* ---- direction / oncoming traffic check (all modes) ---- */
-    int bridge_clear = (b->cars_on_bridge == 0);
-    int same_direction = (b->current_direction == side);
-    int bridge_ok = bridge_clear || same_direction;
+    /* Direction / oncoming traffic check (all modes) */
+    int bridge_clear    = (b->cars_on_bridge == 0);
+    int same_direction  = (b->current_direction == side);
+    int bridge_ok       = bridge_clear || same_direction;
 
-    /* ---- opposite-ambulance yield rule (all modes) ---- */
+    /* Opposite-ambulance yield rule (all modes) */
     int must_yield = (!head->is_ambulance &&
                       opp_head != NULL &&
                       opp_head->is_ambulance);
 
+    /* ---- SEMAPHORE ---- */
     if (b->mode == MODE_SEMAPHORE)
     {
         LightState my_light = b->light[side];
 
-        if (head->is_ambulance) {
+        if (head->is_ambulance)
+            /* Ambulance on RED: enter only when bridge is clear */
             return bridge_ok && !must_yield;
-        }
 
         /* Normal car on red: always blocked */
         if (my_light == LIGHT_RED)
             return 0;
 
-        /* Normal car on green: carnage rules */
+        /* Normal car on green: Carnage rules */
         return bridge_ok && !must_yield;
     }
 
-    /*TODO: Add the conditions for a vehicule in Officer mode*/
-    if(b->mode == MODE_OFFICER){
-
+    /* ---- OFFICER ---- */
+    if (b->mode == MODE_OFFICER)
+    {
         OfficerState my_side = b->officer_side[side];
 
-        if (head->is_ambulance) {
+        if (head->is_ambulance)
+            /*
+             * Ambulance on OPP side: enter only when bridge is completely
+             * empty (bridge_ok is false if cars from the other direction
+             * are still crossing).  Ambulance on SAME side: Carnage rules.
+             */
             return bridge_ok && !must_yield;
-        }
 
-        /* Normal car on opp officer's side: always blocked */
-        if (my_side == OPP)
+        /* Normal car on the blocked side: always wait */
+        if (my_side == OPP || my_side == OFFICERs_DAY_OFF)
             return 0;
 
-        /* Normal car on officer's side: until the  */
+        /* Normal car on the active side: Carnage rules while k > 0 */
         return bridge_ok && !must_yield && (b->current_k_value > 0);
     }
 
-    /* CARNAGE (and OFFICER placeholder): direction + yield rules */
+    /* ---- CARNAGE ---- */
     return bridge_ok && !must_yield;
 }
 
@@ -134,9 +136,10 @@ static void try_wake_head(Bridge *b, Direction side)
 Bridge *bridge_create(const Config *config)
 {
     Bridge *b = malloc(sizeof(Bridge));
+    if (!b) return NULL;
 
     b->length = config->bridge_length;
-    b->mode = config->mode;
+    b->mode   = config->mode;
 
     b->slots = malloc(sizeof(pthread_mutex_t) * b->length);
     for (int i = 0; i < b->length; i++)
@@ -144,21 +147,28 @@ Bridge *bridge_create(const Config *config)
 
     pthread_mutex_init(&b->lock, NULL);
 
-    b->cars_on_bridge = 0;
+    b->cars_on_bridge  = 0;
     b->current_direction = NONE;
 
     for (int s = 0; s < 2; s++)
     {
-        b->queue[s].head = NULL;
-        b->queue[s].tail = NULL;
-        b->queue[s].size = 0;
-        b->waiting[s] = 0;
+        b->queue[s].head        = NULL;
+        b->queue[s].tail        = NULL;
+        b->queue[s].size        = 0;
+        b->waiting[s]           = 0;
         b->ambulances_waiting[s] = 0;
-        b->passed_count[s] = 0;
-        b->light[s] = LIGHT_OFF;
+        b->passed_count[s]      = 0;
+        b->light[s]             = LIGHT_OFF;
+        b->officer_side[s]      = OFFICERs_DAY_OFF;
     }
 
+    /* Officer-mode fields */
+    b->current_k_value = 0;
     b->ambulance_reset = 0;
+    b->officer_turn    = EAST;   /* EAST officer thread goes first */
+
+    pthread_cond_init(&b->officer_cv,      NULL);
+    pthread_cond_init(&b->officer_done_cv, NULL);
 
     printf("[BRIDGE] Created with length: %d meters.\n", b->length);
     return b;
@@ -169,7 +179,11 @@ void bridge_destroy(Bridge *b)
     for (int i = 0; i < b->length; i++)
         pthread_mutex_destroy(&b->slots[i]);
     free(b->slots);
+
+    pthread_cond_destroy(&b->officer_cv);
+    pthread_cond_destroy(&b->officer_done_cv);
     pthread_mutex_destroy(&b->lock);
+
     printf("=== Bridge destroyed. ===\n");
     free(b);
 }
@@ -181,13 +195,14 @@ void bridge_destroy(Bridge *b)
 void bridge_enter(Bridge *b, BridgeVehicleInfo *info)
 {
     Direction side = info->direction;
-    FifoQueue *q = &b->queue[side];
+    FifoQueue *q   = &b->queue[side];
 
+    /* Stack-allocate the wait node for this vehicle */
     FifoNode node;
     pthread_cond_init(&node.cv, NULL);
     node.is_ambulance = info->is_ambulance;
-    node.id = info->id;
-    node.next = NULL;
+    node.id           = info->id;
+    node.next         = NULL;
 
     pthread_mutex_lock(&b->lock);
 
@@ -205,7 +220,7 @@ void bridge_enter(Bridge *b, BridgeVehicleInfo *info)
 
     /*
      * If a new ambulance just joined our queue, the opposite head might
-     * now need to yield. Signal it so it re-evaluates its wait condition.
+     * need to yield. Signal it so it re-evaluates its wait condition.
      */
     if (info->is_ambulance)
     {
@@ -215,13 +230,24 @@ void bridge_enter(Bridge *b, BridgeVehicleInfo *info)
     }
 
     /*
-     * Wait until we are at the head AND can_head_enter says yes.
+     * OFFICER mode: if a normal car arrives on the currently-blocked
+     * side, wake the officer so it can check for an early switch
+     * (bridge already empty + active side has no one waiting).
      */
+    if (b->mode == MODE_OFFICER &&
+        !info->is_ambulance &&
+        b->officer_side[side] == OPP)
+    {
+        pthread_cond_signal(&b->officer_cv);
+    }
+
+    /* Wait until we are at the head AND can_head_enter says yes */
     while (q->head != &node || !can_head_enter(b, side))
         pthread_cond_wait(&node.cv, &b->lock);
 
+    /* Grab slot 0 before releasing the bridge lock (prevents race at entry) */
     pthread_mutex_lock(&b->slots[0]);
-    
+
     /* --- Cleared to enter --- */
     fifo_pop(q);
 
@@ -232,8 +258,6 @@ void bridge_enter(Bridge *b, BridgeVehicleInfo *info)
     b->cars_on_bridge++;
     b->current_direction = side;
     b->passed_count[side]++;
-    
-    b->current_k_value--;
 
     printf("[BRIDGE] Vehicle %d entered headed %s%s. Cars on bridge: %d\n",
            info->id,
@@ -241,7 +265,7 @@ void bridge_enter(Bridge *b, BridgeVehicleInfo *info)
            info->is_ambulance ? " [AMBULANCE]" : "",
            b->cars_on_bridge);
 
-    /* Semaphore mode: note when an ambulance crosses on red */
+    /* SEMAPHORE mode: log ambulance crossing on red */
     if (b->mode == MODE_SEMAPHORE &&
         info->is_ambulance &&
         b->light[side] == LIGHT_RED)
@@ -251,32 +275,39 @@ void bridge_enter(Bridge *b, BridgeVehicleInfo *info)
                info->id, side == EAST ? "EAST" : "WEST");
     }
 
-    /* Officer mode: note when an ambulance crosses on from the opposite side*/
+    /* OFFICER mode: ambulance from the blocked side interrupts the flow */
     if (b->mode == MODE_OFFICER &&
         info->is_ambulance &&
         b->officer_side[side] == OPP)
     {
-        printf("[OFFICER] Ambulance %d passing on OPPOSITE DIRECTION (%s). "
-               "Changing sides.\n",
+        printf("[OFFICER] Ambulance %d crossing from BLOCKED side (%s). "
+               "Resetting active side's K.\n",
                info->id, side == EAST ? "EAST" : "WEST");
         b->ambulance_reset = 1;
+        pthread_cond_signal(&b->officer_cv);
     }
-    /*
-     * Wake the new head of our queue — it may also be able to enter
-     * (same-direction pipelining, carnage-style when green).
-     */
-    try_wake_head(b, side);
 
     /*
-     * Wake the opposite head in case it was blocked by us being an
-     * ambulance and can now re-evaluate (e.g. if it is also an ambulance).
+     * Only non-ambulance vehicles on the ACTIVE side consume a K slot.
+     * Ambulances (same or opposite side) are priority passes and do
+     * not count toward the K limit.
      */
+    if (b->mode == MODE_OFFICER &&
+        !info->is_ambulance &&
+        b->officer_side[side] == SAME)
+    {
+        decrement_k_and_notify(b);
+    }
+
+    /* Wake the new head of our queue (same-direction pipelining) */
+    try_wake_head(b, side);
+
+    /* Wake the opposite head in case an ambulance unblocked it */
     Direction opp = (side == EAST) ? WEST : EAST;
     try_wake_head(b, opp);
 
     pthread_mutex_unlock(&b->lock);
 
-    // the b lock called here was moved upwards to solve a race condition with slot 0
     pthread_cond_destroy(&node.cv);
 }
 
@@ -289,7 +320,7 @@ void bridge_advance(Bridge *b, int position)
 void bridge_leave(Bridge *b, BridgeVehicleInfo *info)
 {
     Direction side = info->direction;
-    Direction opp = (side == EAST) ? WEST : EAST;
+    Direction opp  = (side == EAST) ? WEST : EAST;
 
     pthread_mutex_unlock(&b->slots[b->length - 1]);
 
@@ -315,11 +346,10 @@ void bridge_leave(Bridge *b, BridgeVehicleInfo *info)
          *   3. Any vehicle at opposite head  (fairness)
          *   4. Any vehicle at same head
          *
-         * try_wake_head respects the light state, so in SEMAPHORE mode
-         * a normal car on red will not be woken here — it will be woken
-         * when the semaphore thread flips the light to green.
+         * try_wake_head respects light/officer state, so blocked vehicles
+         * will not be woken here — only when the controller enables them.
          */
-        int opp_amb = b->queue[opp].head && b->queue[opp].head->is_ambulance;
+        int opp_amb  = b->queue[opp].head  && b->queue[opp].head->is_ambulance;
         int same_amb = b->queue[side].head && b->queue[side].head->is_ambulance;
 
         if (opp_amb)
@@ -344,12 +374,20 @@ void bridge_leave(Bridge *b, BridgeVehicleInfo *info)
         {
             try_wake_head(b, side);
         }
-    } else {
+
         /*
-         * Bridge is not empty but a slot just freed up.  Wake the same-
-         * direction head if capacity now allows it — this is the case
-         * where the bridge was full and the next car in line was blocked
-         * purely by the capacity check, not by a direction conflict.
+         * OFFICER mode: signal the active officer thread so it can check
+         * the early-switch condition (bridge empty, active side queue also
+         * empty, other side has vehicles waiting).
+         */
+        if (b->mode == MODE_OFFICER)
+            pthread_cond_signal(&b->officer_cv);
+    }
+    else
+    {
+        /*
+         * Bridge not empty but a slot freed up. Wake same-direction head
+         * in case it was blocked only by the capacity limit.
          */
         try_wake_head(b, side);
     }
@@ -363,10 +401,7 @@ void bridge_leave(Bridge *b, BridgeVehicleInfo *info)
 
 /*
  * Called by the semaphore controller thread to flip the lights.
- * green_side becomes GREEN; the other side becomes RED.
- * Both queue heads are poked so they re-evaluate their conditions:
- *   - The newly-green head may now be able to enter.
- *   - The newly-red head must go back to sleep (if it is a normal car).
+ * Acquires bridge->lock internally.
  */
 void bridge_set_light(Bridge *b, Direction green_side)
 {
@@ -375,45 +410,46 @@ void bridge_set_light(Bridge *b, Direction green_side)
     pthread_mutex_lock(&b->lock);
 
     b->light[green_side] = LIGHT_GREEN;
-    b->light[red_side] = LIGHT_RED;
+    b->light[red_side]   = LIGHT_RED;
 
     printf("[SEMAPHORE] Light GREEN for %s, RED for %s\n",
            green_side == EAST ? "EAST" : "WEST",
-           red_side == EAST ? "EAST" : "WEST");
+           red_side   == EAST ? "EAST" : "WEST");
 
-    /* Wake both heads — can_head_enter will sort out who actually enters */
+    /* Wake both heads — can_head_enter decides who actually enters */
     try_wake_head(b, green_side);
-    try_wake_head(b, red_side); /* red ambulance may still enter if bridge empty */
+    try_wake_head(b, red_side);   /* red ambulance may cross if bridge empty */
 
     pthread_mutex_unlock(&b->lock);
 }
 
-/* =================================================== */
-/* ================ OFFICER INTERFACE ================ */
-/* =================================================== */
+/* ===================================================== */
+/* ================ OFFICER INTERFACE  ================= */
+/* ===================================================== */
 
-/*TODO: Officer interface*/
-void bridge_set_officer(Bridge *b, Direction new_side, int k){
-
+/*
+ * Activates `new_side` with a fresh quota of `k` vehicles.
+ *
+ * IMPORTANT: must be called with bridge->lock already held.
+ * Does NOT acquire or release the lock.
+ */
+void bridge_set_officer(Bridge *b, Direction new_side, int k)
+{
     Direction opp_side = (new_side == EAST) ? WEST : EAST;
 
-    pthread_mutex_lock(&b->lock);
+    b->current_k_value          = k;
+    b->officer_side[new_side]   = SAME;
+    b->officer_side[opp_side]   = OPP;
+    b->ambulance_reset          = 0;
 
-    b->current_k_value = k;
-    b->officer_side[new_side] = SAME;
-    b->officer_side[opp_side] = OPP;   
-
-    printf("[OFFICER] BRIDGE ABLED for %s, CLOSED for %s\n",
-           new_side == EAST ? "EAST" : "WEST",
+    printf("[OFFICER] BRIDGE OPEN for %s (k=%d), CLOSED for %s\n",
+           new_side == EAST ? "EAST" : "WEST", k,
            opp_side == EAST ? "EAST" : "WEST");
 
     /* Wake both heads — can_head_enter will sort out who actually enters */
     try_wake_head(b, new_side);
-    try_wake_head(b, opp_side); /* opp ambulance may still enter if bridge empty */
-
-    pthread_mutex_unlock(&b->lock);
+    try_wake_head(b, opp_side);   /* OPP ambulance may still cross if bridge empty */
 }
-
 
 /* ===================================================== */
 /* ================ UTILITY FUNCTIONS ================== */
@@ -424,11 +460,21 @@ int bridge_get_length(Bridge *bridge)
     return bridge ? bridge->length : -1;
 }
 
-int bridge_get_current_k(Bridge *bridge){
-    return bridge->current_k_value;
-}
+/*
+ * Decrements the K counter and notifies the officer thread when the
+ * quota hits zero.  Called only for non-ambulance vehicles on the SAME
+ * officer side (enforced at the call site in bridge_enter).
+ */
+void decrement_k_and_notify(Bridge *bridge)
+{
+    if (bridge->current_k_value <= 0) return;
 
-int bridge_get_ambulance_reset(Bridge *bridge){
-    return bridge->ambulance_reset; // 0 if the flow is interrupted by an ambulance
-                                    // 1 else
+    bridge->current_k_value--;
+    printf("[OFFICER] K slot used. Remaining: %d\n", bridge->current_k_value);
+
+    if (bridge->current_k_value == 0)
+    {
+        printf("[OFFICER] K exhausted — waking officer thread.\n");
+        pthread_cond_signal(&bridge->officer_cv);
+    }
 }

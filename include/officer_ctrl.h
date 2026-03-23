@@ -16,7 +16,8 @@
 typedef struct {
     Bridge       *bridge;
     const Config *config;
-    pthread_t     thread;
+    pthread_t     east_thread;
+    pthread_t     west_thread;
     volatile int  running;  /* set to 0 to request shutdown */
 } OfficerCtrl;
 
