@@ -81,7 +81,8 @@ static const Colour
     C_LIGHT_RED   = COL(220,  50,  50),   /* traffic light red    */
     C_LIGHT_OFF   = COL( 40,  40,  40),   /* unlit bulb           */
     C_LIGHT_BODY  = COL( 30,  30,  30),   /* light housing        */
-    // C_FLOW_GREEN  = COL( 80, 200,  80),   /* direction indicator  */
+    C_FLOW_GREEN  = COL( 80, 200,  80),   /* direction indicator  */
+    C_NO_LIGHT    = COL( 60,  60,  60),
     C_CAR_EAST    = COL( 80, 160, 255),
     C_CAR_WEST    = COL(255, 160,  60),
     C_AMB         = COL(255,  60,  60),
@@ -300,12 +301,13 @@ typedef struct {
     int    active;
 } VehicleState;
 
-#define QUEUE_MAX_DISPLAY 64   /* max vehicles tracked per side in the GUI */
+#define QUEUE_MAX_DISPLAY 128  /* max vehicles whose id/type we store for icon rendering */
 
 typedef struct {
-    int total;                          /* number of vehicles currently waiting */
-    int ids[QUEUE_MAX_DISPLAY];         /* vehicle id,  index 0 = FIFO head     */
-    int is_ambulance[QUEUE_MAX_DISPLAY];/* ambulance flag, same indexing         */
+    int total;                           /* exact count from simulation (can exceed QUEUE_MAX_DISPLAY) */
+    int stored;                          /* how many entries are actually in ids[] / is_ambulance[]   */
+    int ids[QUEUE_MAX_DISPLAY];          /* vehicle id,  index 0 = FIFO head                          */
+    int is_ambulance[QUEUE_MAX_DISPLAY]; /* ambulance flag, same indexing                             */
 } QueueState;
 
 /* ============================================================ */
@@ -321,11 +323,17 @@ static QueueState   queue_east;   /* zero-initialised by C static storage */
 static QueueState   queue_west;
 static int          total_east_passed = 0;
 static int          total_west_passed = 0;
+static int          cars_on_bridge    = 0;  /* authoritative: from entered/exited log lines */
 static int          sim_done          = 0;
 
-static GuiMode  sim_mode              = MODE_CARNAGE; /* updated by [MODE] line  */
+static GuiMode  sim_mode              = MODE_CARNAGE;
 static GuiLight light[2]              = {GLIGHT_OFF, GLIGHT_OFF};
                                         /* light[0]=EAST, light[1]=WEST          */
+
+/* Officer mode state — updated by [OFFICER] and [MODE OFFICER k k] lines */
+static int officer_active_side        = 0;   /* 0=EAST, 1=WEST */
+static int officer_k[2]               = {0, 0};  /* K quota per side from config */
+static int officer_passed[2]          = {0, 0};  /* passed this turn per side    */
 
 #define LOG_BUF_LINES 200
 static char log_buf[LOG_BUF_LINES][256];
@@ -419,28 +427,31 @@ static void *parser_thread(void *arg)
          * [QUEUE EAST|WEST id0:amb0 id1:amb1 ...]
          *
          * Tokens after the side name are  <id>:<is_ambulance>  in FIFO
-         * head-to-tail order.  We parse them into the ordered arrays so
-         * draw_queue can render icons in exact arrival order.
+         * head-to-tail order.  We count every token for an exact total,
+         * but only store up to QUEUE_MAX_DISPLAY entries for icon rendering.
          */
         else if (strncmp(line, "[QUEUE ", 7) == 0) {
             char side[8];
             if (sscanf(line, "[QUEUE %7[A-Z]", side) == 1) {
                 QueueState *qs = (strcmp(side,"EAST")==0) ? &queue_east : &queue_west;
-                qs->total = 0;
+                qs->total  = 0;
+                qs->stored = 0;
 
-                /* Walk the rest of the line token by token */
                 const char *p = line;
-                /* skip past "[QUEUE SIDE" */
-                p = strchr(p, ' '); if (p) p++;  /* skip "[QUEUE" space */
-                p = strchr(p, ' ');               /* find space before first token */
+                p = strchr(p, ' '); if (p) p++;  /* skip past "[QUEUE" */
+                p = strchr(p, ' ');               /* skip past side name */
 
-                while (p && qs->total < QUEUE_MAX_DISPLAY) {
+                while (p) {
                     int id, amb;
                     if (sscanf(p, " %d:%d", &id, &amb) == 2) {
-                        qs->ids[qs->total]          = id;
-                        qs->is_ambulance[qs->total] = amb;
+                        /* Always count for the exact total */
                         qs->total++;
-                        /* advance past this token */
+                        /* Only store if within display capacity */
+                        if (qs->stored < QUEUE_MAX_DISPLAY) {
+                            qs->ids[qs->stored]          = id;
+                            qs->is_ambulance[qs->stored] = amb;
+                            qs->stored++;
+                        }
                         p = strchr(p + 1, ' ');
                     } else {
                         break;
@@ -470,13 +481,43 @@ static void *parser_thread(void *arg)
             }
         }
 
-        /* [MODE CARNAGE|SEMAPHORE|OFFICER] */
+        /* [MODE CARNAGE|SEMAPHORE|OFFICER [east_k west_k]] */
         else if (strncmp(line, "[MODE ", 6) == 0) {
-            char m[16];
-            if (sscanf(line, "[MODE %15[A-Z]]", m) == 1) {
+            char m[16]; int ek = 0, wk = 0;
+            if (sscanf(line, "[MODE %15[A-Z] %d %d]", m, &ek, &wk) >= 1) {
                 if      (strcmp(m,"SEMAPHORE")==0) sim_mode = MODE_SEMAPHORE;
-                else if (strcmp(m,"OFFICER"  )==0) sim_mode = MODE_OFFICER;
+                else if (strcmp(m,"OFFICER"  )==0) {
+                    sim_mode = MODE_OFFICER;
+                    officer_k[0] = ek;  /* EAST k */
+                    officer_k[1] = wk;  /* WEST k */
+                }
                 else                               sim_mode = MODE_CARNAGE;
+            }
+        }
+
+        /* Authoritative bridge occupancy tracking */
+        else if (strstr(line, "entered from") && strstr(line, "[BRIDGE]")) {
+            cars_on_bridge++;
+        }
+        else if (strstr(line, "exited going") && strstr(line, "[BRIDGE]")) {
+            if (cars_on_bridge > 0) cars_on_bridge--;
+        }
+
+        /*
+         * [OFFICER EAST|WEST k_value passed_this_turn]
+         * Emitted by bridge_set_officer and on each K-slot entry.
+         */
+        else if (strncmp(line, "[OFFICER ", 9) == 0
+                 && (strncmp(line, "[OFFICER EAST ", 14) == 0
+                     || strncmp(line, "[OFFICER WEST ", 14) == 0)) {
+            char side[8]; int k, passed;
+            if (sscanf(line, "[OFFICER %7[A-Z] %d %d]", side, &k, &passed) == 3) {
+                int idx = (strcmp(side,"EAST")==0) ? 0 : 1;
+                officer_active_side  = idx;
+                officer_k[idx]       = k;
+                officer_passed[idx]  = passed;
+                /* Reset the other side's passed counter on a new turn */
+                officer_passed[1-idx] = 0;
             }
         }
 
@@ -524,19 +565,19 @@ static void draw_header(SDL_Renderer *ren, int done)
     draw_text_bold(ren, WIN_W/2 - text_width(title)/2, 16, title, C_TEXT);
 }
 
-// Carnage mode: simple flow-direction indicator
+/* ---- Carnage mode: simple flow-direction indicator ---- */
 static void draw_carnage_indicator(SDL_Renderer *ren)
 {
-    // int east_on = (bridge_dir == DIR_EAST);
-    // int west_on = (bridge_dir == DIR_WEST);
+    int east_on = (bridge_dir == DIR_EAST);
+    int west_on = (bridge_dir == DIR_WEST);
 
-    // fill_circle(ren, WIN_W/2 - 80, 52, 10,
-    //            west_on ? C_FLOW_GREEN : C_NO_LIGHT);
-    // draw_text(ren, WIN_W/2 - 93, 68, "W->", C_TEXT_DIM);
+    fill_circle(ren, WIN_W/2 - 80, 52, 10,
+                west_on ? C_FLOW_GREEN : C_NO_LIGHT);
+    draw_text(ren, WIN_W/2 - 93, 68, "W->", C_TEXT_DIM);
 
-    // fill_circle(ren, WIN_W/2 + 80, 52, 10,
-    //            east_on ? C_FLOW_GREEN : C_NO_LIGHT);
-    // draw_text(ren, WIN_W/2 + 70, 68, "->E", C_TEXT_DIM);
+    fill_circle(ren, WIN_W/2 + 80, 52, 10,
+                east_on ? C_FLOW_GREEN : C_NO_LIGHT);
+    draw_text(ren, WIN_W/2 + 70, 68, "->E", C_TEXT_DIM);
 
     const char *dstr =
         bridge_dir == DIR_EAST ? "EASTBOUND" :
@@ -599,13 +640,110 @@ static void draw_semaphore_indicator(SDL_Renderer *ren)
 
     /* EAST light — right side */
     draw_traffic_light(ren, WIN_W/2 + 100, cy,
-                       light[0], "E->", C_EAST_LABEL);
+                       light[0], "->E", C_EAST_LABEL);
 
     /* WEST light — left side */
     draw_traffic_light(ren, WIN_W/2 - 100, cy,
-                       light[1], "<-W", C_WEST_LABEL);
+                       light[1], "W->", C_WEST_LABEL);
 
     /* Centre label: which side is currently flowing */
+    const char *dstr =
+        bridge_dir == DIR_EAST ? "EASTBOUND" :
+        bridge_dir == DIR_WEST ? "WESTBOUND" : "IDLE";
+    Colour dcol =
+        bridge_dir == DIR_EAST ? C_EAST_LABEL :
+        bridge_dir == DIR_WEST ? C_WEST_LABEL  : C_TEXT_DIM;
+    draw_text_bold(ren, WIN_W/2 - text_width(dstr)/2, 46, dstr, dcol);
+}
+
+
+/*
+ * Officer mode indicator: two panels (one per side) showing the K quota
+ * and how many vehicles have passed so far this turn.
+ *
+ *   Layout per panel (centred on zone_cx for each side):
+ *
+ *     [OFFICER]           ← label
+ *     K: N                ← quota for this side
+ *     Passed: M / N       ← progress bar + fraction
+ *
+ * The active side panel is highlighted; the blocked side is dimmed.
+ */
+static void draw_officer_panel(SDL_Renderer *ren, int cx, int cy,
+                                int is_active, int k, int passed,
+                                Colour label_col, const char *side_name)
+{
+    const int PW = 160, PH = 90, PR = 6;
+    int px = cx - PW/2, py = cy - PH/2;
+
+    Colour bg = is_active ? COL(30, 40, 60) : COL(22, 26, 38);
+    fill_rect_r(ren, px, py, PW, PH, bg, PR);
+
+    /* Border — bright for active, dim for blocked */
+    set_col(ren, is_active ? label_col : C_GRID);
+    SDL_Rect border = {px, py, PW, PH};
+    SDL_RenderDrawRect(ren, &border);
+
+    /* "OFFICER" label */
+    char head[32]; snprintf(head, sizeof(head), "OFFICER %s", side_name);
+    draw_text_bold(ren, cx - text_width(head)/2, py + 8, head,
+                   is_active ? label_col : C_TEXT_DIM);
+
+    if (k <= 0) {
+        /* No quota info yet */
+        const char *wait = is_active ? "ACTIVE" : "WAITING";
+        draw_text(ren, cx - text_width(wait)/2, py + 32, wait,
+                  is_active ? C_ENTRY_GREEN : C_TEXT_DIM);
+        return;
+    }
+
+    /* "K: N" */
+    char kbuf[32]; snprintf(kbuf, sizeof(kbuf), "K: %d", k);
+    draw_text(ren, cx - text_width(kbuf)/2, py + 30, kbuf,
+              is_active ? C_TEXT : C_TEXT_DIM);
+
+    /* "Passed: M / N" */
+    char pbuf[32]; snprintf(pbuf, sizeof(pbuf), "Passed: %d / %d", passed, k);
+    draw_text(ren, cx - text_width(pbuf)/2, py + 48, pbuf,
+              is_active ? C_AMBER : C_TEXT_DIM);
+
+    /* Progress bar */
+    int bar_x = px + 12, bar_y = py + 68;
+    int bar_w = PW - 24, bar_h = 10;
+    fill_rect_r(ren, bar_x, bar_y, bar_w, bar_h, C_GRID, 2);
+    if (k > 0) {
+        int fill = (passed * bar_w) / k;
+        if (fill > bar_w) fill = bar_w;
+        if (fill > 0)
+            fill_rect_r(ren, bar_x, bar_y, fill, bar_h,
+                        is_active ? C_ENTRY_GREEN : C_TEXT_DIM, 2);
+    }
+}
+
+static void draw_officer_indicator(SDL_Renderer *ren)
+{
+    /*
+     * Panels are placed at WIN_W/4 and 3*WIN_W/4 so they sit clearly
+     * between the stats block (top-left, x≈30..200) and the bridge side
+     * labels (x≈131..1175), and below the direction label (y≈46..60).
+     * cy=155 keeps the panel (height 90) in the band y=110..200, well
+     * above the bridge tick marks that start around y=240.
+     */
+    int east_cx = WIN_W / 4;
+    int west_cx = (WIN_W * 3) / 4;
+    int cy = 155;
+
+    int east_active = (officer_active_side == 0);
+    int west_active = (officer_active_side == 1);
+
+    draw_officer_panel(ren, east_cx, cy,
+                       east_active, officer_k[0], officer_passed[0],
+                       C_EAST_LABEL, "EAST");
+    draw_officer_panel(ren, west_cx, cy,
+                       west_active, officer_k[1], officer_passed[1],
+                       C_WEST_LABEL, "WEST");
+
+    /* Centre: show which direction currently has the bridge */
     const char *dstr =
         bridge_dir == DIR_EAST ? "EASTBOUND" :
         bridge_dir == DIR_WEST ? "WESTBOUND" : "IDLE";
@@ -619,6 +757,8 @@ static void draw_mode_indicator(SDL_Renderer *ren)
 {
     if (sim_mode == MODE_SEMAPHORE)
         draw_semaphore_indicator(ren);
+    else if (sim_mode == MODE_OFFICER)
+        draw_officer_indicator(ren);
     else
         draw_carnage_indicator(ren);
 }
@@ -703,21 +843,12 @@ static void draw_queue(SDL_Renderer *ren, const QueueState *q, int is_east)
     if (max_icons > 20) max_icons = 20;
 
     /*
-     * Render icons in FIFO order: q->ids[0] is the head (closest to the
-     * bridge), q->ids[total-1] is the tail (most recently arrived).
-     *
-     * EAST queue (left zone):  head goes at the RIGHTMOST position (nearest
-     *   the bridge mouth), tail grows leftward.  Icon for index i sits at
-     *   position (max_icons - 1 - i) from the left edge.
-     *
-     * WEST queue (right zone): head goes at the LEFTMOST position (nearest
-     *   the bridge mouth), tail grows rightward.  Icon for index i sits at
-     *   position i from the left edge.
-     *
-     * In both cases index 0 (head) is visually closest to the bridge.
+     * Render icons in FIFO order using q->stored (capped) entries.
+     * q->total is the exact count used for the label — it may exceed
+     * QUEUE_MAX_DISPLAY when there are very many waiting vehicles.
      */
     int ambs = 0;
-    for (int i = 0; i < total && i < max_icons; i++) {
+    for (int i = 0; i < q->stored && i < max_icons; i++) {
         int amb = q->is_ambulance[i];
         if (amb) ambs++;
         Colour c = amb ? C_AMB : (is_east ? C_CAR_EAST : C_CAR_WEST);
@@ -769,11 +900,7 @@ static void draw_stats(SDL_Renderer *ren)
     snprintf(buf, sizeof(buf), "Passed WEST: %d", total_west_passed);
     draw_text(ren, sx, sy+20, buf, C_WEST_LABEL);
 
-    int on = 0;
-    for (int i = 0; i < MAX_VEHICLES; i++)
-        if (vehicles[i].active && vehicles[i].slot >= 0) on++;
-
-    snprintf(buf, sizeof(buf), "On bridge:   %d", on);
+    snprintf(buf, sizeof(buf), "On bridge:   %d", cars_on_bridge);
     draw_text(ren, sx, sy+40, buf, C_TEXT);
 }
 
@@ -805,6 +932,8 @@ static void draw_log_panel(SDL_Renderer *ren)
         else if (strstr(lines[i], "Switching") || strstr(lines[i], "direction"))
             col = C_AMBER;
         else if (strstr(lines[i], "[SEMAPHORE]") || strstr(lines[i], "Light GREEN"))
+            col = C_AMBER;
+        else if (strstr(lines[i], "[OFFICER]") || strstr(lines[i], "BRIDGE OPEN"))
             col = C_AMBER;
 
         char trunc[108];

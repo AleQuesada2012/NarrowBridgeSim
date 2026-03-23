@@ -51,7 +51,8 @@ void* vehicle_thread(void *arg)
     BridgeVehicleInfo info = {
         v->id,
         v->direction,
-        v->is_ambulance
+        v->is_ambulance,
+        0   /* consumed_k_slot — set by bridge_enter if applicable */
     };
 
     double speed_mps  = v->speed / 3.6;
@@ -76,7 +77,7 @@ void* vehicle_thread(void *arg)
            v->is_ambulance);
     fflush(stdout);
 
-    for (int i = 0; i < bridge_get_length(v->bridge) - 1; i++)
+    for (int i = 0; i < v->bridge->length - 1; i++)
     {
         usleep((useconds_t)(meter_time * 1e6));
         bridge_advance(v->bridge, i);

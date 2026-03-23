@@ -121,6 +121,13 @@ typedef struct {
     int       id;
     Direction direction;
     int       is_ambulance;
+    /*
+     * Set to 1 by bridge_enter when this vehicle consumed a K slot
+     * (officer mode, active side, k > 0 or not an ambulance).
+     * Read by bridge_leave to decide whether to decrement k_on_bridge.
+     * Always initialised to 0 before bridge_enter is called.
+     */
+    int       consumed_k_slot;
 } BridgeVehicleInfo;
 
 typedef struct Bridge Bridge;

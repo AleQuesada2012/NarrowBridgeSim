@@ -51,7 +51,11 @@ int main(int argc, char *argv[]) {
     switch (config.mode) {
         case MODE_CARNAGE:   printf("[MODE CARNAGE]\n");   break;
         case MODE_SEMAPHORE: printf("[MODE SEMAPHORE]\n"); break;
-        case MODE_OFFICER:   printf("[MODE OFFICER]\n");   break;
+        case MODE_OFFICER:
+            /* Include K values so the GUI can display them from startup */
+            printf("[MODE OFFICER %d %d]\n",
+                   config.east.k_value, config.west.k_value);
+            break;
     }
     fflush(stdout);
 
@@ -65,7 +69,6 @@ int main(int argc, char *argv[]) {
     if (config.mode == MODE_SEMAPHORE)
         semaphore_ctrl_start(&sem_ctrl, bridge, &config);
 
-    /* Start the officer controller only in OFFICER mode */
     OfficerCtrl officer_ctrl;
     if (config.mode == MODE_OFFICER)
         officer_ctrl_start(&officer_ctrl, bridge, &config);
@@ -75,7 +78,6 @@ int main(int argc, char *argv[]) {
     if (config.mode == MODE_SEMAPHORE)
         semaphore_ctrl_stop(&sem_ctrl);
 
-    /* Stop the officer controller after all traffic has finished */
     if (config.mode == MODE_OFFICER)
         officer_ctrl_stop(&officer_ctrl);
 

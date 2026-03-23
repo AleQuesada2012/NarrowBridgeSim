@@ -62,6 +62,28 @@ static void emit_direction(const Bridge *b)
     fflush(stdout);
 }
 
+/*
+ * Emit officer state for the GUI.
+ * Format: [OFFICER <EAST|WEST> <k_value> <passed_this_turn>]
+ *   EAST|WEST        — which side is currently ACTIVE (has the turn)
+ *   k_value          — the K quota for the active side this turn
+ *   passed_this_turn — how many K-slot vehicles have entered so far
+ *
+ * passed_this_turn = (original k) - current_k_value
+ * We derive it here so the GUI does not need to remember the original k.
+ * Must be called with bridge->lock held.
+ */
+static void emit_officer(const Bridge *b, Direction active_side, int original_k)
+{
+    int passed = original_k - b->current_k_value;
+    if (passed < 0) passed = 0;
+    printf("[OFFICER %s %d %d]\n",
+           active_side == EAST ? "EAST" : "WEST",
+           original_k,
+           passed);
+    fflush(stdout);
+}
+
 /* ===================================================== */
 /* ================ ENTRY PREDICATE ==================== */
 /* ===================================================== */
@@ -357,9 +379,12 @@ void bridge_enter(Bridge *b, BridgeVehicleInfo *info)
     {
         b->current_k_value--;
         b->k_on_bridge++;
+        info->consumed_k_slot = 1;  /* flag so bridge_leave decrements correctly */
         printf("[OFFICER] K slot used%s. Remaining entries: %d, still crossing: %d\n",
                info->is_ambulance ? " [AMBULANCE]" : "",
                b->current_k_value, b->k_on_bridge);
+        /* Update GUI with new passed count */
+        emit_officer(b, side, b->current_k_value + b->k_on_bridge);
     }
     else if (b->mode == MODE_OFFICER &&
              info->is_ambulance &&
@@ -468,7 +493,7 @@ void bridge_leave(Bridge *b, BridgeVehicleInfo *info)
      * When both k_on_bridge and current_k_value reach 0 the entire
      * quota has fully crossed — wake the officer to switch sides.
      */
-    if (b->mode == MODE_OFFICER && b->k_on_bridge > 0)
+    if (b->mode == MODE_OFFICER && info->consumed_k_slot)
     {
         b->k_on_bridge--;
         printf("[OFFICER] %s fully crossed. Still crossing: %d, entries left: %d\n",
@@ -544,6 +569,9 @@ void bridge_set_officer(Bridge *b, Direction new_side, int k)
     printf("[OFFICER] BRIDGE OPEN for %s (k=%d), CLOSED for %s\n",
            new_side == EAST ? "EAST" : "WEST", k,
            opp_side == EAST ? "EAST" : "WEST");
+
+    /* Structured line for the GUI */
+    emit_officer(b, new_side, k);
 
     /* Wake both heads — can_head_enter will sort out who actually enters */
     try_wake_head(b, new_side);
