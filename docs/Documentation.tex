@@ -3,6 +3,9 @@
 \usepackage{graphicx}
 \usepackage{geometry}
 \usepackage{tocloft} 
+\usepackage{listings}
+\usepackage{xcolor}
+\usepackage{booktabs}
 \usepackage[hidelinks]{hyperref}  
 \renewcommand{\cftsecleader}{\cftdotfill{\cftdotsep}}
 \usepackage{apacite}
@@ -56,7 +59,7 @@ By:\\
 
 \vfill
 \small
-Alajuela, March 19, 2026
+Alajuela, March 23, 2026
 \end{center}
 
 \newpage
@@ -105,10 +108,526 @@ When multiple threads execute concurrently and share resources, such as a narrow
 Improper scheduling and resource allocation among concurrent processes can lead to catastrophic system states. For many applications, a process needs exclusive access to not one resource, but several. Suppose, for example, two processes each want to scan an object with a 3D scanner and then print the front, top, and side view of the object on a printer. Process A requests permission to use the 3D scanner and is granted it. Process B is programmed differently and requests the printer first and is also granted it. Now A asks for the printer, but the request is suspended until B releases it. Unfortunately, instead of releasing the printer, B asks for the 3D scanner. At this point both processes are blocked and will remain so forever. This situation is called a \textbf{deadlock} \cite[Chap.~6, p.~437]{modernOS}.
 
 \section{Solution Description}
-\section{Conclusions}
-\section{Experience Description}
-\section{Personal Key Takeaways}
+% ---- listings style for C code ----
+\lstdefinestyle{cstyle}{
+  language=C,
+  basicstyle=\ttfamily\small,
+  keywordstyle=\color{blue}\bfseries,
+  commentstyle=\color{gray}\itshape,
+  stringstyle=\color{teal},
+  numbers=left,
+  numberstyle=\tiny\color{gray},
+  numbersep=8pt,
+  breaklines=true,
+  frame=single,
+  rulecolor=\color{black!20},
+  backgroundcolor=\color{black!3},
+  captionpos=b,
+  tabsize=4,
+  showstringspaces=false,
+}
 
+\subsection{Overview}
+
+The narrow bridge simulation is implemented as a multi-threaded C program
+using the POSIX Threads (Pthreads) library. Every entity in the problem
+is represented by an independent thread: each vehicle is a thread, each
+traffic generator is a thread, and the semaphore controller (in
+\texttt{SEMAPHORE} mode) is a thread. A separate process handles the
+graphical interface by reading the simulation's standard output through a
+Unix pipe. The build system is managed with \texttt{make}, and the
+graphical visualiser is built with the SDL2 library.
+
+\subsection{Module Structure}
+
+The project is organized into distinct source modules, each with a
+well-defined responsibility. Source files are placed under \texttt{src/},
+header files under \texttt{include/}, and object files are emitted into
+\texttt{build/} by the build system. The modules are summarized in
+Table~\ref{tab:modules}.
+
+\begin{table}[h!]
+  \centering
+  \caption{Source modules and their responsibilities.}
+  \label{tab:modules}
+  \begin{tabular}{lp{9cm}}
+    \toprule
+    \textbf{Module} & \textbf{Responsibility} \\
+    \midrule
+    \texttt{config}           & Parses the \texttt{.config} file into a
+                                \texttt{Config} struct. Validates all
+                                parameters and aborts with a clear error
+                                message on invalid input. \\[4pt]
+    \texttt{bridge}           & Owns all shared bridge state and every
+                                synchronization primitive. Implements the
+                                three entry predicates (Carnage, Semaphore,
+                                Officer) through a single
+                                \texttt{can\_head\_enter} function. \\[4pt]
+    \texttt{vehicle}          & Defines the \texttt{Vehicle} struct and the
+                                \texttt{vehicle\_thread} routine. Emits
+                                structured \texttt{[SLOT]} log lines on
+                                every meter advance for the GUI. \\[4pt]
+    \texttt{traffic\_generator} & Spawns vehicle threads according to an
+                                exponential inter-arrival distribution,
+                                independently for each side of the bridge. \\[4pt]
+    \texttt{semaphore\_ctrl}  & Implements the traffic-light controller
+                                thread (active only in \texttt{SEMAPHORE}
+                                mode). Cycles green phases using wall-clock
+                                timers read from the configuration. \\[4pt]
+    \texttt{officer\_ctrl}  & Implements the officer controller
+                                threads (active only in \texttt{OFFICER}
+                                mode). Cycles between sides based using the corresponding $k$ value \\[4pt]
+    \texttt{main}             & Entry point. Loads configuration, creates
+                                the bridge, conditionally starts the
+                                semaphore controller, and joins all threads
+                                before teardown. \\[4pt]
+    \texttt{gui}              & A standalone process that reads the
+                                simulation's standard output through a pipe,
+                                parses structured log lines, and renders a
+                                live SDL2 window. \\
+    \bottomrule
+  \end{tabular}
+\end{table}
+
+\subsection{Data Structures}
+
+\subsubsection{Configuration (\texttt{Config})}
+
+All simulation parameters are stored in a \texttt{Config} struct defined
+in \texttt{config.h}. Each side of the bridge has its own
+\texttt{SideConfig}, containing the exponential arrival mean, speed range,
+ambulance percentage, green-light duration, and officer $K$ value. The
+bridge length and simulation duration are global parameters. The operating
+mode is an enumeration with three values: \texttt{MODE\_CARNAGE},
+\texttt{MODE\_SEMAPHORE}, and \texttt{MODE\_OFFICER}.
+
+\subsubsection{FIFO Wait Queue (\texttt{FifoQueue} / \texttt{FifoNode})}
+
+Each side of the bridge maintains a singly-linked FIFO queue of vehicles
+currently waiting to enter. A \texttt{FifoNode} is stack-allocated inside
+\texttt{bridge\_enter} for the duration of each vehicle's wait, avoiding
+heap allocation per vehicle:
+
+\begin{lstlisting}[style=cstyle, caption={FIFO node and queue structures (\texttt{bridge.h}).}]
+typedef struct FifoNode {
+    pthread_cond_t   cv;           /* this vehicle sleeps here   */
+    int              is_ambulance; /* inspected by the bridge    */
+    int              id;           /* for logging                */
+    struct FifoNode *next;
+} FifoNode;
+
+typedef struct {
+    FifoNode *head;   /* next vehicle to enter the bridge */
+    FifoNode *tail;   /* most recently arrived vehicle    */
+    int       size;
+} FifoQueue;
+\end{lstlisting}
+
+Vehicles join the tail in strict arrival order; there is no reordering at
+any point. Ambulance priority is enforced by inspecting
+\texttt{head->is\_ambulance} at the point of entry, not by repositioning
+nodes. This means every vehicle waits its fair turn in the queue, and only
+once it reaches the head does its ambulance status influence whether it can
+proceed onto the bridge.
+
+\subsubsection{Bridge State (\texttt{Bridge})}
+
+The central shared structure is \texttt{Bridge}:
+
+\begin{lstlisting}[style=cstyle, caption={Bridge structure (\texttt{bridge.h}).}]
+struct Bridge {
+    int              length;
+    pthread_mutex_t  lock;
+    pthread_mutex_t *slots;    /* per-meter mutex array        */
+
+    Mode             mode;
+
+    FifoQueue        queue[2]; /* one FIFO per side            */
+    LightState       light[2]; /* SEMAPHORE mode only          */
+
+    int              cars_on_bridge;
+    Direction        current_direction;
+
+    int              waiting[2];
+    int              ambulances_waiting[2];
+    int              passed_count[2];
+
+    int              current_k_value;
+    int              k_on_bridge;
+    int              ambulance_reset;
+    OfficerState     officer_side[2];
+    Direction        officer_turn;
+    pthread_cond_t   officer_cv;
+    pthread_cont_t   officer_done_cv;
+};
+\end{lstlisting}
+
+The \texttt{slots} array is a dynamically allocated array of mutexes, one
+per meter of bridge length. A vehicle holds \texttt{slots[i]} while
+occupying meter $i$ and acquires \texttt{slots[i+1]} before releasing
+\texttt{slots[i]}, producing sequential movement with no two vehicles
+sharing a meter. The \texttt{light} array is indexed by \texttt{Direction}
+(\texttt{EAST=0}, \texttt{WEST=1}) and is only meaningful in
+\texttt{SEMAPHORE} mode; in other modes it is set to \texttt{LIGHT\_OFF}.
+
+\subsubsection{Traffic Light State (\texttt{LightState})}
+
+The semaphore mode introduces a \texttt{LightState} enumeration with three
+values: \texttt{LIGHT\_GREEN}, \texttt{LIGHT\_RED}, and \texttt{LIGHT\_OFF}.
+Only one side can be green at a time. The \texttt{bridge\_set\_light}
+function, called exclusively by the semaphore controller thread, updates
+both entries in \texttt{light[]} under \texttt{bridge->lock} and then
+wakes the head of each queue so they can re-evaluate the entry predicate.
+
+\subsubsection{Officer Sides (\texttt{OfficerState})}
+
+The officer mode introduces a \texttt{OfficerState} enumeration with three values: \texttt{SAME}, \texttt{OPP}, and \texttt{OFFICERs\_DAY\_OFF}.
+Only one officer can be awake at the time (letting the cars in). The \texttt{bridge\_set\_officer}
+function, called exclusively by the officer controller thread, updates
+both entries in \texttt{officer\_side[]} under \texttt{bridge->lock} and then
+wakes the head of each queue so they can re-evaluate the entry predicate.
+
+\subsection{Synchronization Design}
+
+\subsubsection{The Entry Predicate}
+
+All synchronization decisions flow through a single static function,
+\texttt{can\_head\_enter}, which returns \texttt{1} if the vehicle at the
+head of a given side's FIFO is currently permitted to enter the bridge.
+This is the only place where mode-specific rules diverge:
+
+\begin{lstlisting}[style=cstyle, caption={Entry predicate (simplified from \texttt{bridge.c}).}]
+static int can_head_enter(const Bridge *b, Direction side)
+{
+    const FifoNode *head     = b->queue[side].head;
+    const FifoNode *opp_head = b->queue[opp].head;
+
+    int bridge_ok  = (b->cars_on_bridge == 0 ||
+                      b->current_direction == side);
+    int must_yield = (!head->is_ambulance &&
+                      opp_head != NULL    &&
+                      opp_head->is_ambulance);
+
+    if (b->mode == MODE_SEMAPHORE) {
+        if (head->is_ambulance && b->light[side] == LIGHT_RED)
+            return (b->cars_on_bridge == 0) && !must_yield;
+        if (!head->is_ambulance && b->light[side] == LIGHT_RED)
+            return 0;
+    }
+    if (b->mode == MODE_OFFICER) {
+        OfficerState my_side = b->officer_side[side];
+        if (head->is_ambulance)
+        {
+            if (my_side == OPP)
+                return bridge_clear && !must_yield;
+            return bridge_ok && !must_yield;
+        }
+        if (my_side == OPP || my_side == OFFICERs_DAY_OFF)
+            return 0;
+        return bridge_ok && !must_yield && (b->current_k_value > 0);
+
+    return bridge_ok && !must_yield;
+}
+\end{lstlisting}
+
+The logic for each combination of vehicle type, light state, and mode is
+summarized in Table~\ref{tab:entry}.
+
+\begin{table}[h!]
+  \centering
+  \caption{Entry conditions by vehicle type and mode.}
+  \label{tab:entry}
+  \begin{tabular}{llp{7.5cm}}
+    \toprule
+    \textbf{Mode} & \textbf{Vehicle} & \textbf{Condition to enter} \\
+    \midrule
+    Carnage  & Any car       & Bridge empty or same direction, and no ambulance at the opposite head. \\
+    Carnage  & Ambulance     & Bridge empty or same direction (not blocked by opposite ambulance either). \\
+    \midrule
+    Semaphore & Car, green   & Same as Carnage. \\
+    Semaphore & Car, red     & Never — must wait for green. \\
+    Semaphore & Ambulance, green & Same as Carnage. \\
+    Semaphore & Ambulance, red  & Only when the bridge is completely empty (no oncoming traffic). Light does not change. \\
+    \bottomrule
+    Officer & Car, current officer side   & Same as Carnage (until $k$ value runs out. \\
+    Officer & Car, opposite officer side  & Never — must wait for the officer to change sides. \\
+    Officer & Ambulance, current officer side & Same as Carnage, but the ambulance can enter even if the $k$ value runs out. \\
+    Officer & Ambulance, opposite officer side & Only when the bridge is completely empty (no oncoming traffic). Officer changes sides, resetting the $k$ value.
+  \end{tabular}
+\end{table}
+
+\subsubsection{Per-Vehicle Condition Variables}
+
+Each \texttt{FifoNode} carries its own \texttt{pthread\_cond\_t},
+initialized when the vehicle thread calls \texttt{bridge\_enter} and
+destroyed before it returns. This means only the specific vehicle that
+should wake up is signalled — there is no broadcast, no spurious wake-up
+storm, and no need for an additional ready flag. The wait loop in
+\texttt{bridge\_enter} is:
+
+\begin{lstlisting}[style=cstyle, caption={Wait loop in \texttt{bridge\_enter}.}]
+while (q->head != &node || !can_head_enter(b, side))
+    pthread_cond_wait(&node.cv, &b->lock);
+\end{lstlisting}
+
+The double condition guards against two distinct cases: the vehicle is not
+yet at the front of the queue (\texttt{q->head != \&node}), or it is at
+the front but the bridge state does not yet permit entry.
+
+\subsubsection{Wake Protocol}
+
+Every function that changes bridge state calls \texttt{try\_wake\_head}
+for the relevant sides. This helper calls \texttt{pthread\_cond\_signal}
+on the head's condition variable if and only if \texttt{can\_head\_enter}
+returns true, preventing unnecessary wakeups. The sites that trigger wakes
+are:
+
+\begin{itemize}
+  \item \textbf{\texttt{bridge\_enter}}: after a vehicle enters the bridge,
+    the new head of the same queue is woken (pipelining), and the opposite
+    head is woken in case it was waiting for the previous ambulance to clear.
+  \item \textbf{\texttt{bridge\_leave}}: when the bridge empties, one side
+    is chosen according to the priority order (opposite ambulance,
+    same ambulance, opposite normal, same normal) and its head is woken.
+  \item \textbf{\texttt{bridge\_set\_light}}: the semaphore controller
+    wakes both heads after a light flip; the newly-green head may now
+    enter, and a red-side ambulance may be able to cross if the bridge
+    is empty.
+    \item \textbf{\texttt{bridge\_set\_officer}}: as the semaphore controller, the officer controller
+    wakes both heads after a change in sides; the current direction head may now
+    enter, and a opposite-side ambulance may be able to cross if the bridge
+    is empty.
+  \item \textbf{Ambulance arrival}: when a new ambulance joins a queue, the
+    opposite head is signalled immediately so it can re-evaluate and
+    yield if required.
+\end{itemize}
+
+\subsubsection{Physical Bridge Traversal}
+
+The bridge is modelled as an array of \texttt{length} mutexes, one per
+meter. A vehicle acquires \texttt{slots[0]} upon entering and then performs
+a hand-over-hand lock sequence: it acquires \texttt{slots[i+1]} before
+releasing \texttt{slots[i]} as it advances. This prevents two vehicles
+occupying the same meter and naturally produces the sequential progression
+required by the problem specification.
+
+\subsection{Operating Modes}
+
+\subsubsection{Carnage Mode}
+
+In Carnage mode neither the semaphore controller nor any other external
+thread intervenes. The only rules are: vehicles may enter if the bridge is
+empty or already flowing in their direction, and a normal car must yield if
+an ambulance is waiting at the head of the opposite queue. Multiple
+same-direction vehicles pipeline onto the bridge simultaneously.
+
+\subsubsection{Semaphore Mode}
+
+The semaphore controller (\texttt{semaphore\_ctrl.c}) runs as a dedicated
+thread that cycles two independent green-phase timers read from the
+configuration file: \texttt{east\_green\_time} and
+\texttt{west\_green\_time}. The timers are purely wall-clock based and are
+not paused, reset, or otherwise affected by bridge events. When a phase
+expires, \texttt{bridge\_set\_light} is called under \texttt{bridge->lock},
+the \texttt{light[]} entries are updated atomically, and both queue heads
+are signalled to re-evaluate. Cars already mid-crossing when the light
+changes complete their crossing normally; the new red-side head simply
+waits in its condition variable until the next green phase.
+
+Ambulances are the only vehicles exempt from the red-light rule. An
+ambulance at the head of a red queue is permitted to enter if and only if
+\texttt{cars\_on\_bridge == 0}. Crossing on red does not alter the light
+timer in any way.
+
+\subsubsection{Officer Mode}
+
+The officer controller is planned as a pair of dedicated thread that calls a \texttt{bridge\_set\_officer} function each time the $K$-vehicle quota
+(each side has its own $K$ value) for the current side is exhausted and there is no more cars on the bridge. 
+For normal cars on the active side, the predicate \texttt{can\_head\_enter} checks that the quota is still positive ($k>0$) and that the usual Carnage conditions (bridge empty or same direction, no opposite ambulance waiting)
+hold. Each admitted normal car decrements \texttt{current\_k\_value} and increments \texttt{k\_on\_bridge}. When the quota reaches zero, no further normal cars may enter; the bridge continues to drain the cars that are already crossing.
+\\
+Ambulances are given priority. If an ambulance waits at the head of the active queue: 
+\begin{itemize}
+\item If $k>0$ it consumes one quota slot (like a normal car).
+\item If $k$ is already exhausted, it is allowed to enter without consuming a quota slot (privilege pass).
+\end{itemize}
+If an ambulance is at the head of the \emph{blocked} side, it may cross only when the bridge is completely empty. When such a crossing happens, the \emph{active} officer thread’s turn is terminated early: \texttt{ambulance\_reset} is set and the active officer is woken via \texttt{officer\_cv} to hand over control to the other side.
+\\
+As of the current implementation the officer mode scaffolding is present in
+the \texttt{Mode} enumeration but not yet active.
+
+\subsection{Traffic Generation}
+
+Two generator threads run concurrently, one per side, each independently
+sampling inter-arrival times from an exponential distribution with the
+configured mean. The formula used is $t = -\mu \ln(1 - u)$ where $u$ is a
+uniform random variable in $[0,1)$. Each generator uses a thread-local
+seed for \texttt{rand\_r}, avoiding contention on a global RNG. A global
+atomic counter protected by a dedicated mutex provides unique vehicle IDs.
+Generators run for \texttt{simulation\_time} seconds and then wait for all
+vehicle threads they spawned to finish before exiting, ensuring a clean
+shutdown without stranded threads.
+
+\subsection{Build System}
+
+The project uses a GNU Makefile with the following design decisions:
+
+\begin{itemize}
+  \item \textbf{Source discovery via \texttt{wildcard}}: the line
+    \texttt{SRC = \$(wildcard \$(SRC\_DIR)/*.c)} picks up all \texttt{.c}
+    files in \texttt{src/} automatically. Adding a new module such as
+    \texttt{officer\_ctrl.c} requires no Makefile change.
+  \item \textbf{Separate build directory}: all \texttt{.o} files are emitted
+    to \texttt{build/}, keeping the source tree clean.
+  \item \textbf{Strict compiler flags}: \texttt{-Wall -Wextra -Werror}
+    ensure that every warning is treated as a build failure. The simulation
+    binary links with \texttt{-pthread} and \texttt{-lm}.
+  \item \textbf{GUI binary separated}: the graphical interface (\texttt{gui.c})
+    is compiled as a distinct target, \texttt{bridge\_gui}, because it
+    requires \texttt{-lSDL2} which the simulation does not need. The
+    \texttt{run-gui} target pipes the simulation into the GUI process:
+    \texttt{./bridge\_sim \$(CONFIG) | ./bridge\_gui}.
+  \item \textbf{Platform detection}: the Makefile detects the operating
+    system and architecture using \texttt{uname -s} and \texttt{uname -m}
+    at parse time. On Apple Silicon macOS it adds \texttt{-I/opt/X11/include}
+    and \texttt{-I/opt/homebrew/include}; on Linux these flags are omitted
+    because SDL2 headers are in the standard system paths.
+  \item \textbf{SDL2 flag delegation}: the GUI compile flags are obtained
+    via \texttt{sdl2-config -{}-cflags} and \texttt{sdl2-config -{}-libs}
+    when available, falling back to \texttt{pkg-config} and finally to a
+    bare \texttt{-lSDL2}.
+\end{itemize}
+
+\subsection{Graphical Interface}
+
+The GUI is implemented as a second standalone process in \texttt{gui.c}.
+It communicates with the simulation exclusively through standard I/O: the
+simulation emits structured log lines to \texttt{stdout} and the GUI reads
+them from \texttt{stdin} through a Unix pipe. This design means the
+simulation requires no modification to support the GUI, and the GUI can be
+dropped or replaced without touching the simulation code.
+
+\subsubsection{Structured Log Protocol}
+
+Three machine-readable line formats are emitted by the simulation alongside
+the human-readable console output:
+
+\begin{itemize}
+  \item \texttt{[SLOT id slot bridge\_len direction is\_ambulance]} ---
+    emitted by the vehicle thread on every meter advance. \texttt{slot} is
+    the current 0-based meter index, or $-1$ when the vehicle has fully
+    exited the bridge. This allows the GUI to track every vehicle's position
+    with meter-level precision.
+  \item \texttt{[QUEUE EAST|WEST total ambulances]} --- emitted by
+    \texttt{bridge\_enter} and \texttt{bridge\_leave} whenever the waiting
+    counters change, so the GUI always reflects the current queue lengths.
+  \item \texttt{[DIRECTION EAST|WEST|NONE]} --- emitted by
+    \texttt{bridge\_set\_light} and \texttt{bridge\_leave} whenever the
+    authorised direction changes.
+\end{itemize}
+
+All other lines (human-readable vehicle and bridge events) are forwarded to
+a circular log buffer rendered in a panel at the bottom of the window.
+
+\subsubsection{SDL2 and Rendering}
+
+SDL2 was chosen over Xlib because it is the only graphics library that
+works natively on both supported platforms (x86-64 Linux and Apple Silicon
+macOS) without requiring XQuartz or any other compatibility layer. On Linux
+SDL2 is installed via \texttt{apt install libsdl2-dev}; on macOS via
+\texttt{brew install sdl2}.
+
+Because SDL2 provides no built-in text rendering without the optional
+\texttt{SDL2\_ttf} extension library (which was not available in the build
+environment), a 5$\times$7 pixel bitmap font covering the full printable
+ASCII range is baked directly into \texttt{gui.c} as a 95-entry lookup
+table of 5 bytes per glyph. Each set bit in a column byte corresponds to
+one lit pixel row; the font is rendered at $2\times$ scale, yielding
+$10\times14$ pixel glyphs. This eliminates every external font dependency.
+
+The GUI parser runs on a dedicated thread that feeds shared state under a
+mutex. The main thread runs the SDL2 event loop and redraws at approximately
+15 frames per second using \texttt{SDL\_GetTicks} for frame throttling.
+High-DPI displays (Retina on macOS) are handled by calling
+\texttt{SDL\_GetRendererOutputSize} and \texttt{SDL\_RenderSetScale} so
+the logical coordinate system remains fixed regardless of pixel density.
+
+\subsection{Deadlock and Starvation Prevention}
+
+Several design choices explicitly prevent deadlock and starvation:
+
+\begin{itemize}
+  \item \textbf{Single global lock}: all bridge state is protected by a
+    single \texttt{pthread\_mutex\_t}. There is never more than one lock
+    held at a time (except the per-meter slot mutex, which is acquired after
+    the global lock is released), so lock-ordering deadlocks cannot occur.
+  \item \textbf{No busy-waiting}: all waiting is done through
+    \texttt{pthread\_cond\_wait}, which atomically releases the lock and
+    suspends the thread.
+  \item \textbf{FIFO guarantees no starvation within a side}: because
+    vehicles join the queue in arrival order and are never reordered, every
+    vehicle is eventually guaranteed to reach the head.
+  \item \textbf{Direction alternation}: when the bridge empties in Carnage
+    mode, the opposite side is given priority if it has waiting vehicles,
+    preventing indefinite starvation of one side by a continuous stream from
+    the other.
+  \item \textbf{Ambulance priority bounded}: ambulances do not jump the FIFO
+    queue. Their privilege is expressed only at the head: a non-ambulance at
+    the head of the opposite queue must yield, but it will eventually enter
+    once the ambulance clears the bridge.
+\end{itemize}
+
+
+\section{Conclusions}
+Through the design, implementation, and testing of this project, several technical conclusions regarding concurrency, thread management, and process scheduling were reached. The execution of the program yielded the following key observations:
+\subsection{Concurrency and deadlock prevention}
+Proper implementation of mutexes and synchronization tools is absolutely essential to maintain data integrity and prevent deadlocks. Results confirmed that strict access control to the bridge was necessary so that cars, traffic officers, and semaphores could execute their routines safely without resorting to busy waiting.
+\subsection{Performance of the modes}
+The simulation proved that the \textbf{Traffic Officer mode} is the best strategy for maximizing bridge utilization and minimizing wait times, overcoming the flaws of the other two modes:
+\begin{itemize}
+    \item \textbf{Carnage:} Allows continuous flow but causes resource starvation if one direction has heavy traffic.
+    \item \textbf{Semaphore:} Guarantees strict fairness but is inefficient, often leaving the bridge without use, if the green-light side has no waiting cars.
+    \item \textbf{Traffic Officer:} Uses dynamic scheduling. The K quota prevents starvation, while the "early switch" mechanism (yielding the turn immediately if the active side is empty) maximizes bridge utilization and reduces waiting times.
+\end{itemize}
+\subsection{Impact of randomness on the simulation}
+Using an exponential distribution for vehicle arrival times and assigning varying speeds to each car accurately simulated real-world unpredictability. This randomness thoroughly stress-tested the system's logic, proving that the simulation could handle irregular traffic spikes and different crossing durations independently for each side without failing.
+
+\section{Description of the Experience}
+
+Prior to this project, the team shared a common starting point: little to no practical
+experience with concurrent programming in C. For most members, this language had only been
+used in the context of simple, self-contained algorithms or short single-file programs,
+and the \texttt{pthreads} library was unfamiliar territory. This made the
+initial design phase particularly challenging, as the project required not only learning
+a new tool, but also applying it to a problem where correctness depended on getting
+the concurrency model exactly right.\\
+The first major obstacle the team encountered was grasping the mental model behind
+threads. Understanding how multiple threads share state, and more importantly how
+that shared state can become inconsistent without proper synchronization, required a
+shift in thinking that went beyond what any of us had previously practiced. Concepts
+such as mutex locks, condition variables, and the \texttt{pthread\_cond\_wait} /
+\texttt{pthread\_cond\_signal} pattern had to be understood not just in isolation, but
+in the context of a live system where several threads compete and cooperate simultaneously.\\
+Translating the three bridge management modes (Carnage, Semaphore, and Officer) into thread-safe implementations was where most of the confusion accumulated. 
+Each mode introduced a different set of rules about when a vehicle thread was allowed toproceed, and finding a clean, unified 
+predicate (\texttt{can\_head\_enter}) that correctly encoded those rules for all three modes required multiple iterations and
+a great deal of debugging. The Officer mode in particular demanded careful design, as it introduced a second layer of coordination between vehicle threads and a dedicated controller thread, 
+with the additional complexity of ambulance priority handling and the K-slot accounting system.\\
+Beyond the technical challenges, the project reinforced the importance of team communication as a practical engineering skill. 
+There were moments where the group's collective understanding of the problem diverged, leading to implementations
+that were individually logical but incompatible with each other. Resolving those divergences required the team to slow down, align on a shared model, and only then return to the code.\\
+Version control also played a meaningful role throughout the development process. 
+Managing a shared codebase across multiple contributors, handling branches, resolving conflicts, and maintaining a coherent commit history were skills that the team exercised continuously and that will remain useful well beyond this course.\\
+Overall, the project succeeded in its formative goal: it placed the team in a situation where the theory of operating systems (scheduling, synchronization, deadlock prevention) had to be confronted directly and implemented responsibly. 
+The experience was demanding, but it left each member with a concrete understanding of concurrent systems that lectures alone could not have provided.
+
+
+\section{Personal Key Takeaways}
+\begin{itemize}
+    \item Alejandro: "I personally did not have a clue about the usage of pthread prior to the development of this project. I had only used C for very simple, short algorithms, most of the time for monolithic/single-file problem solving and other small applications. Apart from learning about \texttt{pthread} and its included functions, I also had to dig into some information about SDL2, a graphic development library for C. In tandem, I employed my —yet to be refined more and more— knowledge with git and GitHub, by creating the project repository, handling commit diversions, branches and other common basic advantages of sourcing a github repository."
+    \item Angie: "The most important thing I learned in this project was how to use the \texttt{phthreads} library to manage threads and concurrency. Understanding and implementing the different modes (Carnage, Semaphore, and Traffic Officers) was really confusing for my teammates and me at first, especially since we had to represent every entity as an individual thread. However, this experience taught me the value of team communication, which was essential for us to figure out the implementation, resolve our confusion, and complete the project successfully."
+    \item Esteban: "Honestly, I knew nothing about how to use \texttt{phthreads} nor the language C. The way to use threads was somewhat confusing to me at the beggining, but after learning a little, I started to understand the conditions, the signals and the parallelization to be more efficient. Nonetheless, the most important thing this experience give me was that, even if I am not at my best, I have to do the best I can."
+\end{itemize}
 
 \bibliographystyle{apa}
 \bibliography{source}
