@@ -81,8 +81,6 @@ static const Colour
     C_LIGHT_RED   = COL(220,  50,  50),   /* traffic light red    */
     C_LIGHT_OFF   = COL( 40,  40,  40),   /* unlit bulb           */
     C_LIGHT_BODY  = COL( 30,  30,  30),   /* light housing        */
-    C_FLOW_GREEN  = COL( 80, 200,  80),   /* direction indicator  */
-    C_NO_LIGHT    = COL( 60,  60,  60),
     C_CAR_EAST    = COL( 80, 160, 255),
     C_CAR_WEST    = COL(255, 160,  60),
     C_AMB         = COL(255,  60,  60),
@@ -568,16 +566,16 @@ static void draw_header(SDL_Renderer *ren, int done)
 /* ---- Carnage mode: simple flow-direction indicator ---- */
 static void draw_carnage_indicator(SDL_Renderer *ren)
 {
-    int east_on = (bridge_dir == DIR_EAST);
-    int west_on = (bridge_dir == DIR_WEST);
+    // int east_on = (bridge_dir == DIR_EAST);
+    // int west_on = (bridge_dir == DIR_WEST);
 
-    fill_circle(ren, WIN_W/2 - 80, 52, 10,
-                west_on ? C_FLOW_GREEN : C_NO_LIGHT);
-    draw_text(ren, WIN_W/2 - 93, 68, "W->", C_TEXT_DIM);
+    // fill_circle(ren, WIN_W/2 - 80, 52, 10,
+    //             west_on ? C_FLOW_GREEN : C_NO_LIGHT);
+    // draw_text(ren, WIN_W/2 - 93, 68, "<-W", C_TEXT_DIM);
 
-    fill_circle(ren, WIN_W/2 + 80, 52, 10,
-                east_on ? C_FLOW_GREEN : C_NO_LIGHT);
-    draw_text(ren, WIN_W/2 + 70, 68, "->E", C_TEXT_DIM);
+    // fill_circle(ren, WIN_W/2 + 80, 52, 10,
+    //             east_on ? C_FLOW_GREEN : C_NO_LIGHT);
+    // draw_text(ren, WIN_W/2 + 70, 68, "E->", C_TEXT_DIM);
 
     const char *dstr =
         bridge_dir == DIR_EAST ? "EASTBOUND" :
@@ -640,11 +638,11 @@ static void draw_semaphore_indicator(SDL_Renderer *ren)
 
     /* EAST light — right side */
     draw_traffic_light(ren, WIN_W/2 + 100, cy,
-                       light[0], "->E", C_EAST_LABEL);
+                       light[0], "E->", C_EAST_LABEL);
 
     /* WEST light — left side */
     draw_traffic_light(ren, WIN_W/2 - 100, cy,
-                       light[1], "W->", C_WEST_LABEL);
+                       light[1], "<-W", C_WEST_LABEL);
 
     /* Centre label: which side is currently flowing */
     const char *dstr =
